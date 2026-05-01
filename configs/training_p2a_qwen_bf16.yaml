@@ -1,0 +1,47 @@
+# P2-A training config: Qwen2.5-1.5B-Instruct bf16 (full precision).
+#
+# Hypothesis: 4-bit quantisation was the bottleneck preventing in_character
+# from crossing 4.0. This run isolates precision as the only changed variable
+# vs M5-v7 iter75 (the Phase 1 best).
+#
+# Changes vs M5-v7:
+#   model:         Qwen2.5-1.5B-Instruct-4bit → Qwen2.5-1.5B-Instruct-bf16
+#   learning_rate: 2e-4 → 1e-4  (bf16 has finer gradients, lower lr for stability)
+#
+# Everything else is identical to M5-v7 for clean comparison:
+#   data, r, alpha, dropout, keys, iters, batch_size, seed
+
+model: "mlx-community/Qwen2.5-1.5B-Instruct-bf16"
+train: true
+data: "data/mlx_curated_medium"
+
+seed: 42
+fine_tune_type: "lora"
+
+batch_size: 4
+iters: 248
+val_batches: 10
+learning_rate: 1.0e-4
+steps_per_eval: 25
+steps_per_report: 10
+save_every: 25
+
+max_seq_length: 1024
+grad_checkpoint: true
+
+num_layers: -1
+lora_parameters:
+  rank: 4
+  alpha: 8
+  dropout: 0.10
+  scale: 10.0
+  keys:
+    - "self_attn.q_proj"
+    - "self_attn.k_proj"
+    - "self_attn.v_proj"
+    - "self_attn.o_proj"
+    - "mlp.gate_proj"
+    - "mlp.up_proj"
+    - "mlp.down_proj"
+
+adapter_path: "outputs/adapters/p2a_qwen_bf16"

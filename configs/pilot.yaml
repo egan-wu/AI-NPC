@@ -1,0 +1,37 @@
+# M3 pilot config — used with CLI overrides for `model` and `adapter_path`.
+# Example:
+#   mlx_lm.lora --config configs/pilot.yaml \
+#     --model mlx-community/gemma-2-2b-it-4bit \
+#     --adapter-path outputs/pilot/gemma
+#
+# Pilot uses the simple default LoRA targets (q_proj, v_proj on all layers)
+# for fairness across all 3 candidates. Phi-3-mini has fused QKV/gate-up
+# layers, which would break an explicit 7-key list. Full M4 training will use
+# the explicit 7-module list (PROJECT_PLAN §5.2) on the chosen base.
+
+model: "PLACEHOLDER_OVERRIDE_VIA_CLI"
+train: true
+data: "data/mlx_pilot"
+
+seed: 42
+fine_tune_type: "lora"
+
+batch_size: 4
+iters: 40                # ~3 epochs over 54 samples at batch 4
+val_batches: 3           # 14 valid samples / batch 4
+learning_rate: 2.0e-4
+steps_per_eval: 20
+steps_per_report: 5
+save_every: 20
+
+max_seq_length: 1024
+grad_checkpoint: true
+
+num_layers: -1           # apply LoRA to all layers
+lora_parameters:
+  rank: 8
+  alpha: 16
+  dropout: 0.05
+  scale: 10.0
+
+adapter_path: "PLACEHOLDER_OVERRIDE_VIA_CLI"

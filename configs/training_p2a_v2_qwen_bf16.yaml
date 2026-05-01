@@ -1,0 +1,48 @@
+# P2-A-v2: Qwen2.5-1.5B-Instruct bf16, lr=2e-4 (same as 4-bit M5-v7 baseline).
+#
+# Hypothesis: jailbreak collapsed in P2-A (lr=1e-4) because 75 iterations at
+# half the learning rate = ~37.5 gradient-step-equivalents — not enough for
+# jailbreak instruction-following to converge.
+#
+# This run tests whether the in_char gain from bf16 precision (+0.15 vs 4-bit)
+# survives at the original lr=2e-4, and whether jailbreak recovers.
+#
+# Changes vs P2-A:
+#   learning_rate: 1e-4 → 2e-4  (restore to M5-v7 baseline value)
+#
+# Everything else identical to P2-A for clean comparison.
+
+model: "mlx-community/Qwen2.5-1.5B-Instruct-bf16"
+train: true
+data: "data/mlx_curated_medium"
+
+seed: 42
+fine_tune_type: "lora"
+
+batch_size: 4
+iters: 248
+val_batches: 10
+learning_rate: 2.0e-4
+steps_per_eval: 25
+steps_per_report: 10
+save_every: 25
+
+max_seq_length: 1024
+grad_checkpoint: true
+
+num_layers: -1
+lora_parameters:
+  rank: 4
+  alpha: 8
+  dropout: 0.10
+  scale: 10.0
+  keys:
+    - "self_attn.q_proj"
+    - "self_attn.k_proj"
+    - "self_attn.v_proj"
+    - "self_attn.o_proj"
+    - "mlp.gate_proj"
+    - "mlp.up_proj"
+    - "mlp.down_proj"
+
+adapter_path: "outputs/adapters/p2a_v2_qwen_bf16"

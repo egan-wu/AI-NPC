@@ -1,0 +1,48 @@
+# M5-v5 curated training config.
+# Strategy from Aarhus paper (Fixed-Persona SLMs, arXiv:2511.10277):
+# small high-quality dataset > large dataset for LoRA NPC fine-tuning.
+#
+# Changes vs training.yaml:
+#   - data: data/mlx_curated (247 samples, hand-scored top picks vs 1120)
+#   - iters: 247 / batch 4 = 62 steps/epoch × 4 epochs ≈ 248 iters
+#     (more epochs since fewer samples — see paper's "smaller dataset, more passes")
+#   - lora rank: 8 → 4  (reduce capacity, force pattern-learning over memorization)
+#   - dropout: 0.05 → 0.10  (stronger regularization)
+#   - keys: kept full 7-key list (consistent with M4/M5)
+#   - adapter_path: outputs/adapters/v5_curated (preserve M5-v4 for comparison)
+
+model: "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+train: true
+data: "data/mlx_curated"
+
+seed: 42
+fine_tune_type: "lora"
+
+batch_size: 4
+# 247 samples / batch 4 ≈ 62 steps/epoch. 4 epochs = 248 iters.
+iters: 248
+val_batches: 10
+learning_rate: 2.0e-4
+steps_per_eval: 25
+steps_per_report: 10
+save_every: 25
+
+max_seq_length: 1024
+grad_checkpoint: true
+
+num_layers: -1
+lora_parameters:
+  rank: 4
+  alpha: 8
+  dropout: 0.10
+  scale: 10.0
+  keys:
+    - "self_attn.q_proj"
+    - "self_attn.k_proj"
+    - "self_attn.v_proj"
+    - "self_attn.o_proj"
+    - "mlp.gate_proj"
+    - "mlp.up_proj"
+    - "mlp.down_proj"
+
+adapter_path: "outputs/adapters/v5_curated"

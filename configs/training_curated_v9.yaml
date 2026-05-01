@@ -1,0 +1,52 @@
+# M5-v9 training config: medium prompt + 291 curated samples (247 + 55 new).
+#
+# Problem diagnosed in M5-v7/v8:
+#   in_character ceiling at 3.85 caused by two data gaps:
+#   (1) Modern vocab mismatch: train had credit/PayPal/phone, eval used
+#       dollars/Venmo/smartphone/WiFi/video-games/GPS — surface forms differ
+#   (2) In-character coverage: high-frequency NPC queries (where to stay,
+#       price check, report crime) each had only 1 training example; eval
+#       used paraphrase variants the model couldn't generalize to
+#
+# Fix: +55 targeted samples (30 modern coverage + 25 in-char variants)
+# Everything else identical to M5-v7 for clean comparison.
+#
+# Previous results for reference:
+#   M5-v7 iter75: in_character=3.85, jailbreak=4.60 ← best checkpoint so far
+#   M5-v7 final:  in_character=3.75, jailbreak=3.60 ← memorization relapse
+#   M5-v8 iter75: in_character=3.60, jailbreak=2.40 ← attn-only failed
+
+model: "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+train: true
+data: "data/mlx_curated_v9"
+
+seed: 42
+fine_tune_type: "lora"
+
+batch_size: 4
+iters: 291
+val_batches: 10
+learning_rate: 2.0e-4
+steps_per_eval: 25
+steps_per_report: 10
+save_every: 25
+
+max_seq_length: 1024
+grad_checkpoint: true
+
+num_layers: -1
+lora_parameters:
+  rank: 4
+  alpha: 8
+  dropout: 0.10
+  scale: 10.0
+  keys:
+    - "self_attn.q_proj"
+    - "self_attn.k_proj"
+    - "self_attn.v_proj"
+    - "self_attn.o_proj"
+    - "mlp.gate_proj"
+    - "mlp.up_proj"
+    - "mlp.down_proj"
+
+adapter_path: "outputs/adapters/v9_curated_v9"

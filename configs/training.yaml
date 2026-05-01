@@ -1,0 +1,45 @@
+# M4 full training config.
+# Base model decided by M3 pilot (REPORT.md §M3 Decision):
+#   Qwen2.5-1.5B beat Phi-3-mini on refusal (1.80 vs 1.15) and jailbreak
+#   resistance (2/5 vs 0/5 held). Gemma-2 was excluded — its chat template
+#   hard-rejects the system role.
+
+model: "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+train: true
+data: "data/mlx"
+
+seed: 42
+fine_tune_type: "lora"
+
+batch_size: 4
+# iters re-tuned 2026-04-29 (M5-v2): after merging v1+v2+v3 raw files, train set has
+# 1120 samples. batch 4 → ~280 steps/epoch. Target 2 epochs → 560 iters.
+iters: 560
+val_batches: 10
+learning_rate: 2.0e-4
+steps_per_eval: 25
+steps_per_report: 10
+save_every: 50
+
+max_seq_length: 1024
+grad_checkpoint: true
+
+# LoRA targets per PROJECT_PLAN §5.2. The explicit 7-key list works for
+# Qwen2.5 (unfused QKV + MLP). The pilot used MLX-LM defaults (q_proj +
+# v_proj only) for fairness across candidates; M4 uses the full list.
+num_layers: -1
+lora_parameters:
+  rank: 8
+  alpha: 16
+  dropout: 0.05
+  scale: 10.0
+  keys:
+    - "self_attn.q_proj"
+    - "self_attn.k_proj"
+    - "self_attn.v_proj"
+    - "self_attn.o_proj"
+    - "mlp.gate_proj"
+    - "mlp.up_proj"
+    - "mlp.down_proj"
+
+adapter_path: "outputs/adapters/v1"
