@@ -1,12 +1,3 @@
-.env
-__pycache__/
-*.pyc
-.venv/
-venv/
-data/raw/
-data/processed/
-outputs/
-.DS_Store
 outputs/adapters/*/checkpoint-*/
 outputs/adapters/*/best_adapter/
 outputs/adapters/**/*.safetensors
