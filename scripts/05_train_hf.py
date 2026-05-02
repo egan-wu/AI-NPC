@@ -14,12 +14,13 @@ import os
 import yaml
 import torch
 from datasets import Dataset
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from peft import LoraConfig, get_peft_model
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    BitsAndBytesConfig,
     TrainingArguments,
+    Trainer,
+    DataCollatorForLanguageModeling,
 )
 from trl import SFTTrainer
 
@@ -45,7 +46,18 @@ def build_dataset(jsonl_path: str, tokenizer, max_seq_length: int) -> Dataset:
             tokenize=False,
             add_generation_prompt=False,
         )
-        return {"text": text}
+        # Tokenize for Trainer
+        encoded = tokenizer(
+            text,
+            max_length=max_seq_length,
+            truncation=True,
+            padding="max_length",
+            return_tensors="pt"
+        )
+        return {
+            "input_ids": encoded["input_ids"][0],
+            "attention_mask": encoded["attention_mask"][0],
+        }
 
     ds = Dataset.from_list(rows).map(fmt, remove_columns=["messages"])
     return ds
@@ -67,17 +79,9 @@ def main():
     print(f"Output: {cfg['adapter_path']}")
     print()
 
-    # ── load model in 4-bit ──────────────────────────────────────────────────
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_use_double_quant=True,
-    )
-
+    # ── load model (full precision with LoRA) ───────────────────────────────
     model = AutoModelForCausalLM.from_pretrained(
         cfg["model"],
-        quantization_config=bnb_config,
         device_map="auto",
         torch_dtype=torch.bfloat16,
         attn_implementation="eager",
@@ -86,7 +90,6 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = prepare_model_for_kbit_training(model)
     model.config.use_cache = False
 
     # ── attach LoRA ──────────────────────────────────────────────────────────
@@ -119,14 +122,16 @@ def main():
 
     bf16_supported = torch.cuda.is_bf16_supported()
 
-    trainer = SFTTrainer(
-        model=model,
+    data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
+        mlm=False,
+    )
+
+    trainer = Trainer(
+        model=model,
         train_dataset=train_ds,
         eval_dataset=valid_ds,
-        dataset_text_field="text",
-        max_seq_length=cfg["max_seq_length"],
-        dataset_num_proc=2,
+        data_collator=data_collator,
         args=TrainingArguments(
             per_device_train_batch_size=cfg["per_device_train_batch_size"],
             gradient_accumulation_steps=cfg["gradient_accumulation_steps"],
