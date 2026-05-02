@@ -1,0 +1,45 @@
+# Phase 2 LoRA Routing — LoRA_Deflect adapter
+#
+# Trains the "in-character deflection" half of the dual-LoRA routing system.
+# This adapter handles p ≈ 1: modern / jailbreak inputs that must be deflected
+# with persona-appropriate in-world responses (NOT hard blocks).
+#
+# Dataset: data/lora_deflect/  (trap inputs + Haiku-authored deflections)
+# Blending: at inference, scaled by p via src/lora_router.py
+#
+# Learning rate is slightly higher than lora_inchar because the deflect dataset
+# is smaller (~30 traps × 5 personas = 150 samples). We also allow more steps
+# per sample by reducing per_device_train_batch_size to 2.
+#
+# IMPORTANT: lora_r and lora_alpha must match lora_inchar exactly so that the
+# two adapters' scaling factors are directly comparable during blend arithmetic.
+
+model: "mistralai/Mistral-7B-Instruct-v0.3"
+data: "data/lora_deflect"
+adapter_path: "outputs/adapters/lora_deflect"
+
+seed: 42
+max_seq_length: 1024
+
+# LoRA — must match lora_inchar (same r, alpha)
+lora_r: 8
+lora_alpha: 16
+lora_dropout: 0.05
+lora_target_modules:
+  - "q_proj"
+  - "k_proj"
+  - "v_proj"
+  - "o_proj"
+  - "gate_proj"
+  - "up_proj"
+  - "down_proj"
+
+# Training — smaller dataset, smaller batch for more gradient steps per sample
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 2
+max_steps: 200
+learning_rate: 1.5e-4
+warmup_steps: 10
+eval_steps: 25
+save_steps: 25
+logging_steps: 10

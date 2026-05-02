@@ -1,20 +1,30 @@
 """
 src/npc_interface.py — Core NPC Interface
 
-Single entry point for the full SLM pipeline:
-  Player Input → [Exp E Guard] → (blocked) or → [P2-C LLM] → NPC Response
+Single entry point for the full SLM pipeline.  Three inference modes:
 
-Supports two modes:
-  - Full mode  : loads Mistral-7B adapter, requires GPU
-  - Guard-only : runs Exp E guard only, no GPU needed (mock LLM response)
+  "guard"       (default) — hard gate: blocked inputs never reach the LLM.
+                Requires: adapter_path OR mock=True
+  "soft_label"  — guard probability → bucket token → prepended to user input.
+                LLM sees ALL inputs (nothing hard-blocked); learns spectrum.
+                Requires: adapter_path (Phase 1 MLX or Phase 2 HF soft-label adapter)
+  "routing"     — dual LoRA blending: p scales LoRA_InChar vs LoRA_Deflect.
+                Requires: inchar_path + deflect_path (Phase 2 RunPod adapters)
 
 Usage:
-    from src.npc_interface import NPCInterface, NPCResponse
+    # Mode 1 — guard (original)
+    npc = NPCInterface(adapter_path="outputs/adapters/p2c_mistral7b/best_adapter",
+                       persona_id="innkeeper_marta")
 
-    npc = NPCInterface(
-        adapter_path="outputs/adapters/p2c_mistral7b/best_adapter",
-        persona_id="innkeeper_marta",
-    )
+    # Mode 2 — soft-label token
+    npc = NPCInterface(adapter_path="outputs/adapters/softlabel_v1/best_adapter",
+                       persona_id="innkeeper_marta", mode="soft_label")
+
+    # Mode 3 — LoRA routing
+    npc = NPCInterface(inchar_path="outputs/adapters/lora_inchar/best_adapter",
+                       deflect_path="outputs/adapters/lora_deflect/best_adapter",
+                       persona_id="innkeeper_marta", mode="routing")
+
     result = npc.query("Where can I find a room for the night?")
     print(result.response)
 """
@@ -367,36 +377,70 @@ class NPCInterface:
 
     def __init__(
         self,
-        adapter_path: str = "outputs/adapters/p2c_mistral7b/best_adapter",
-        persona_id: str = "innkeeper_marta",
+        adapter_path:  str = "outputs/adapters/p2c_mistral7b/best_adapter",
+        persona_id:    str = "innkeeper_marta",
         personas_yaml: str = "configs/personas.yaml",
-        mock: bool = False,
-        verbose: bool = False,
+        mock:          bool = False,
+        verbose:       bool = False,
+        mode:          str  = "guard",
+        # LoRA routing mode only:
+        inchar_path:   Optional[str] = None,
+        deflect_path:  Optional[str] = None,
     ):
+        """
+        Parameters
+        ----------
+        mode : "guard" | "soft_label" | "routing"
+            Inference mode. See module docstring for details.
+        inchar_path : str, optional
+            Path to LoRA_InChar adapter (mode="routing" only).
+        deflect_path : str, optional
+            Path to LoRA_Deflect adapter (mode="routing" only).
+        """
+        if mode not in ("guard", "soft_label", "routing"):
+            raise ValueError(f"Unknown mode: {mode!r}. "
+                             "Expected 'guard', 'soft_label', or 'routing'.")
         if persona_id not in self.VALID_PERSONAS:
             raise ValueError(f"Unknown persona: {persona_id!r}. "
                              f"Valid: {self.VALID_PERSONAS}")
 
-        self._persona_id  = persona_id
+        self._persona_id    = persona_id
         self._personas_yaml = personas_yaml
-        self._verbose = verbose
+        self._verbose       = verbose
+        self._mode          = mode
 
         # Guard (always real — no GPU required)
         print("[Guard] Loading Exp E three-tier guard …")
         self._guard = _GuardLayer()
         print("[Guard] Ready.")
 
-        # LLM
-        adapter_exists = Path(adapter_path).exists()
-        if mock or not adapter_exists:
-            if not adapter_exists and not mock:
-                print(f"[LLM] Adapter not found at {adapter_path!r} — "
-                      "falling back to mock mode.")
-            self._llm = _MockLLMBackend(personas_yaml)
-            self._mock = True
-        else:
-            self._llm = _LLMBackend(adapter_path, personas_yaml)
+        # ── LLM backend selection ─────────────────────────────────────────────
+        if mode == "routing":
+            if not inchar_path or not deflect_path:
+                raise ValueError(
+                    "mode='routing' requires both inchar_path and deflect_path."
+                )
+            from src.lora_router import LoRARouter
+            print("[LLM] Loading dual-LoRA routing backend …")
+            self._router = LoRARouter(
+                base_model_id="mistralai/Mistral-7B-Instruct-v0.3",
+                inchar_path=inchar_path,
+                deflect_path=deflect_path,
+            )
+            self._llm  = None
             self._mock = False
+        else:
+            self._router = None
+            adapter_exists = Path(adapter_path).exists()
+            if mock or not adapter_exists:
+                if not adapter_exists and not mock:
+                    print(f"[LLM] Adapter not found at {adapter_path!r} — "
+                          "falling back to mock mode.")
+                self._llm  = _MockLLMBackend(personas_yaml)
+                self._mock = True
+            else:
+                self._llm  = _LLMBackend(adapter_path, personas_yaml)
+                self._mock = False
 
     # ── Public methods ────────────────────────────────────────────────────────
 
@@ -408,6 +452,10 @@ class NPCInterface:
     def is_mock(self) -> bool:
         return self._mock
 
+    @property
+    def mode(self) -> str:
+        return self._mode
+
     def switch_persona(self, persona_id: str) -> None:
         """Hot-swap NPC persona without reloading the model."""
         if persona_id not in self.VALID_PERSONAS:
@@ -418,22 +466,57 @@ class NPCInterface:
         """
         Process a single player input through the full pipeline.
 
-        Returns an NPCResponse with guard details and LLM response.
-        Blocked inputs return response="[BLOCKED]".
+        Behaviour varies by mode:
+          "guard"      — hard-block modern/jailbreak; pass in-char to LLM.
+          "soft_label" — never hard-block; prepend bucket token then call LLM.
+          "routing"    — never hard-block; blend two LoRA adapters by p.
         """
         t0 = time.perf_counter()
 
-        # ── Guard ─────────────────────────────────────────────────
         blocked, tier, tokens, prob = self._guard.evaluate(user_input)
 
-        if blocked:
-            response_text = "[BLOCKED]"
-        else:
+        if self._mode == "guard":
+            # ── Original hard-gate behaviour ──────────────────────────────
+            if blocked:
+                response_text = "[BLOCKED]"
+            else:
+                sys_prompt = self._llm.persona_prompt(self._persona_id)
+                response_text = self._llm.generate(
+                    sys_prompt, user_input, max_new_tokens,
+                    persona_id=self._persona_id,
+                )
+
+        elif self._mode == "soft_label":
+            # ── Soft-label token: guard never hard-blocks; LLM handles all ─
+            from src.soft_label import prob_to_token, prepend_token
+            # keyword hits get p = -1.0; treat as highest-risk bucket
+            p_for_token = 0.95 if prob < 0 else prob
+            token = prob_to_token(p_for_token)
+            tagged_input = prepend_token(user_input, token)
+            tier = f"softlabel:{token}"
+            blocked = False          # no hard block in this mode
             sys_prompt = self._llm.persona_prompt(self._persona_id)
             response_text = self._llm.generate(
-                sys_prompt, user_input, max_new_tokens,
+                sys_prompt, tagged_input, max_new_tokens,
                 persona_id=self._persona_id,
             )
+
+        else:  # mode == "routing"
+            # ── Dual-LoRA blend: p drives the inchar ↔ deflect ratio ──────
+            p_for_blend = 0.95 if prob < 0 else max(0.0, min(1.0, prob))
+            blocked = False           # no hard block in this mode
+            import yaml as _yaml
+            with open(self._personas_yaml, encoding="utf-8") as f:
+                _raw = _yaml.safe_load(f)
+            sys_prompt = next(
+                p["system_prompt"] for p in _raw["personas"]
+                if p["id"] == self._persona_id
+            )
+            response_text = self._router.generate(
+                sys_prompt, user_input, p=p_for_blend,
+                max_new_tokens=max_new_tokens,
+            )
+            tier = f"routing:p={p_for_blend:.2f}"
 
         latency = (time.perf_counter() - t0) * 1000
 

@@ -1,0 +1,46 @@
+# Phase 1 — Soft-Label Token Architecture
+#
+# Training config for the MLX adapter that learns the [SAFE] / [MILD] /
+# [MODERN_LOW/MID/HIGH] / [JAILBREAK] behavioural spectrum. The dataset
+# (data/mlx_softlabel) is produced by scripts/13_build_softlabel_dataset.py
+# plus a follow-up Haiku pass that authors deflection responses for the
+# trap stubs.
+#
+# We keep all LoRA hyperparameters identical to training_curated_v9.yaml so
+# the only experimental variable is the prefix-token training signal.
+
+model: "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+train: true
+data: "data/mlx_softlabel"
+
+seed: 42
+fine_tune_type: "lora"
+
+batch_size: 4
+# Adjust once data builder has run — total rows in train.jsonl
+iters: 350
+val_batches: 10
+learning_rate: 2.0e-4
+steps_per_eval: 25
+steps_per_report: 10
+save_every: 25
+
+max_seq_length: 1024
+grad_checkpoint: true
+
+num_layers: -1
+lora_parameters:
+  rank: 4
+  alpha: 8
+  dropout: 0.10
+  scale: 10.0
+  keys:
+    - "self_attn.q_proj"
+    - "self_attn.k_proj"
+    - "self_attn.v_proj"
+    - "self_attn.o_proj"
+    - "mlp.gate_proj"
+    - "mlp.up_proj"
+    - "mlp.down_proj"
+
+adapter_path: "outputs/adapters/softlabel_v1"

@@ -268,3 +268,100 @@ Merge LoRA adapter into base weights → `outputs/merged/` (safetensors, fp16).
 | Base model lacks English style range | M3 pilot will surface this before full training |
 | MLX adapter not portable to Unsloth | Acceptable — we re-train on NVIDIA from same JSONL if migrating |
 | Catastrophic forgetting (model loses general English) | Low LoRA rank (r=8) + 3 epochs limits this; eval on a few general-knowledge probes as a sanity check |
+
+---
+
+## 11. Phase 3 — Integrated Guard + LLM Architecture (New)
+
+### 11.1 Motivation
+
+The original architecture uses a hard gate: blocked inputs never reach the LLM.
+This means the guard signal is discarded — the LLM has no awareness of *why*
+an input was considered suspicious, and cannot produce a graded in-character
+response. Two new architectures correct this.
+
+---
+
+### 11.2 Architecture A — Soft-Label Token (Phase 1, Apple Silicon)
+
+The guard's continuous probability `p` is discretised into six bucket tokens
+that are prepended to the user input before it reaches the LLM:
+
+| Token | p range | Expected LLM behaviour |
+|---|---|---|
+| `[SAFE]` | 0.00 – 0.25 | Answer normally, fully in character |
+| `[MILD]` | 0.25 – 0.45 | Answer with mild caution |
+| `[MODERN_LOW]` | 0.45 – 0.60 | Light deflection — confused, jest it off |
+| `[MODERN_MID]` | 0.60 – 0.75 | Firm in-character refusal |
+| `[MODERN_HIGH]` | 0.75 – 0.90 | Strong dismissal or suspicion |
+| `[JAILBREAK]` | 0.90 – 1.00 | Maximum deflection |
+
+**Training pipeline:**
+1. `scripts/13_build_softlabel_dataset.py` — tags existing data + emits deflection stubs
+2. Haiku authoring pass — fills `assistant=None` stubs with in-character deflections
+3. `scripts/03_train_mlx.py --config configs/training_softlabel.yaml`
+
+**Key files:**
+- `src/soft_label.py` — `prob_to_token()`, `prepend_token()`, `strip_token()`
+- `configs/training_softlabel.yaml`
+- `data/mlx_softlabel/`
+
+**Inference:** `NPCInterface(..., mode="soft_label")`
+
+---
+
+### 11.3 Architecture B — LoRA Weight Routing (Phase 2, RunPod)
+
+Two independent LoRA adapters are trained:
+
+- **LoRA_InChar** (`data/lora_inchar/`) — pure in-character dialogue, handles p ≈ 0
+- **LoRA_Deflect** (`data/lora_deflect/`) — modern/jailbreak → deflection, handles p ≈ 1
+
+At inference, both adapters are loaded simultaneously into the base model via
+HuggingFace PEFT. Each adapter's `scaling` factor is overridden per request:
+
+```
+inchar.scaling  = base_scale × (1 − p)
+deflect.scaling = base_scale × p
+```
+
+This is Task Arithmetic (Ilharco et al., 2023) applied at the LoRA level —
+the effective weight delta is a continuous linear interpolation in parameter
+space, not a discrete gate.
+
+**Training pipeline:**
+1. `scripts/14_build_routing_datasets.py` — splits data and emits deflection stubs
+2. Haiku authoring pass — fills deflection stubs
+3. `scripts/14b_merge_deflect.py` — produces train/valid/test for LoRA_Deflect
+4. Train LoRA_InChar:  `scripts/05_train_hf.py --config configs/training_lora_inchar.yaml`
+5. Train LoRA_Deflect: `scripts/05_train_hf.py --config configs/training_lora_deflect.yaml`
+
+**Key files:**
+- `src/lora_router.py` — `LoRARouter` class, dynamic scaling
+- `configs/training_lora_inchar.yaml`
+- `configs/training_lora_deflect.yaml`
+- `data/lora_inchar/`, `data/lora_deflect/`
+
+**Inference:** `NPCInterface(..., mode="routing", inchar_path=..., deflect_path=...)`
+
+> **IMPORTANT:** `lora_r` and `lora_alpha` must be identical in both adapter
+> configs so their scaling factors are directly comparable during blending.
+
+---
+
+### 11.4 Execution Order
+
+```
+Phase 1 (Mac, no GPU required):
+  Step 1 → Run scripts/13_build_softlabel_dataset.py
+  Step 2 → Haiku authoring of deflection stubs  ← switch to Haiku model
+  Step 3 → Train:  python scripts/03_train_mlx.py --config configs/training_softlabel.yaml
+  Step 4 → Eval:   python scripts/12_auto_verify.py --adapter outputs/adapters/softlabel_v1/best_adapter
+
+Phase 2 (RunPod — trigger when Phase 1 eval results are in hand):
+  Step 1 → Run scripts/14_build_routing_datasets.py
+  Step 2 → Haiku authoring of deflection stubs  ← switch to Haiku model
+  Step 3 → Run scripts/14b_merge_deflect.py
+  Step 4 → Train both adapters on RunPod
+  Step 5 → Eval with LoRA routing mode
+```
