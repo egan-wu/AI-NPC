@@ -5,9 +5,17 @@ __pycache__/
 venv/
 data/raw/
 data/processed/
-outputs/
 .DS_Store
+
+# ── outputs: ignore large artifacts, track eval results ──────────────────────
+# Ignore binary model weights everywhere under outputs/
+outputs/**/*.safetensors
+outputs/**/*.bin
+outputs/**/*.gguf
+# Ignore checkpoint directories
 outputs/adapters/*/checkpoint-*/
-outputs/adapters/*/best_adapter/
-outputs/adapters/**/*.safetensors
-outputs/adapters/**/*.bin
+# Ignore bulk training logs / pilot runs
+outputs/logs/
+outputs/pilot/
+# Track these specific result files (force-allow even inside outputs/)
+# Use git add -f outputs/eval/ outputs/routing_*.* to initially stage them

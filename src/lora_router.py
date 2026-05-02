@@ -114,10 +114,34 @@ class LoRARouter:
 
         self._model.eval()
 
-        # Activate both adapters; PEFT supports multi-adapter forward only when
-        # they're stacked. We use weighted-merge semantics manually via scaling
-        # overrides + sequential adapter activation.
+        # Activate both adapters at init so scaling overrides work in generate().
+        self._activate_both_adapters()
         self._active_mode: Optional[str] = None  # "inchar" | "deflect" | "blend"
+
+    # ── Adapter activation ───────────────────────────────────────────────────
+
+    def _activate_both_adapters(self) -> None:
+        """Enable both adapters simultaneously, compatible with all PEFT versions."""
+        # PEFT >= 0.6: set_adapter accepts a list
+        try:
+            self._model.set_adapter([INCHAR_NAME, DEFLECT_NAME])
+            return
+        except TypeError:
+            pass  # older PEFT doesn't accept a list
+
+        # Fallback: directly set active_adapters on every LoRA layer
+        for _, module in self._model.named_modules():
+            if not (hasattr(module, "lora_A") and isinstance(module.lora_A, dict)):
+                continue
+            present = [a for a in (INCHAR_NAME, DEFLECT_NAME) if a in module.lora_A]
+            if not present:
+                continue
+            if hasattr(module, "active_adapters"):
+                module.active_adapters = present
+            elif hasattr(module, "active_adapter") and present:
+                # Very old PEFT: single string — set the first; second is handled
+                # via scaling=0 (set in _apply_blend_scales when p=0 or p=1)
+                module.active_adapter = present[0]
 
     # ── Scaling control ──────────────────────────────────────────────────────
 
@@ -167,9 +191,9 @@ class LoRARouter:
             messages, tokenize=False, add_generation_prompt=True
         )
 
-        # PEFT's stacked-adapter inference: activate both, override scales.
-        # set_adapter accepts a list to enable multiple adapters simultaneously.
-        self._model.set_adapter([INCHAR_NAME, DEFLECT_NAME])
+        # Re-activate both adapters (a prior set_adapter call may have narrowed
+        # the active set) then apply the blend scaling for this p value.
+        self._activate_both_adapters()
         self._apply_blend_scales(p)
 
         try:

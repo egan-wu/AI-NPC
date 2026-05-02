@@ -146,7 +146,7 @@ def main():
             save_strategy="steps",
             save_steps=cfg["save_steps"],
             output_dir=cfg["adapter_path"],
-            optim="adamw_8bit",
+            optim="adamw_torch",
             seed=cfg["seed"],
             load_best_model_at_end=True,
             metric_for_best_model="eval_loss",
