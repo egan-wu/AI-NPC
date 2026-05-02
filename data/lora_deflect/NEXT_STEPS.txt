@@ -1,0 +1,10 @@
+NEXT STEPS for LoRA_Deflect data:
+
+1. Switch active model to Haiku (per CLAUDE.md).
+2. For each stub in deflection_to_author.jsonl, author a one-sentence
+   in-character deflection that matches the deflect_style in _meta.
+3. Run scripts/14b_merge_deflect.py to produce train/valid/test splits.
+   (train 80%, valid 10%, test 10%)
+4. Proceed to RunPod training:
+     LoRA_InChar:  python scripts/05_train_hf.py --config configs/training_lora_inchar.yaml
+     LoRA_Deflect: python scripts/05_train_hf.py --config configs/training_lora_deflect.yaml
