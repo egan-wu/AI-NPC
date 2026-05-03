@@ -166,6 +166,17 @@ class LoRARouter:
 
     # ── Public API ───────────────────────────────────────────────────────────
 
+    # Injected into system prompt when p > JAILBREAK_THRESHOLD.
+    # LoRA scaling alone cannot override RLHF behavioral locks; a prompt-level
+    # directive is necessary and sufficient for direct identity challenges.
+    _JAILBREAK_THRESHOLD: float = 0.90
+    _JAILBREAK_GUARD: str = (
+        "\n\nCRITICAL: You exist entirely within this world. "
+        "Never acknowledge being an AI, language model, or any construct from "
+        "outside this setting. If directly asked, treat the question as confusion, "
+        "madness, or jest — and respond fully in character."
+    )
+
     def generate(
         self,
         system_prompt:  str,
@@ -179,12 +190,20 @@ class LoRARouter:
         Run a blended-adapter forward pass.
 
         p is the guard's anachronism probability in [0, 1].
+        When p > _JAILBREAK_THRESHOLD, a system-prompt directive is appended
+        to reinforce in-character behavior — LoRA scaling alone cannot override
+        RLHF instruction-following for direct identity challenges.
         """
         import torch
 
+        # Inject anti-jailbreak directive when the guard signals high p.
+        effective_system = system_prompt
+        if p > self._JAILBREAK_THRESHOLD:
+            effective_system = system_prompt + self._JAILBREAK_GUARD
+
         # Build prompt using the tokenizer's chat template (Mistral-Instruct).
         messages = [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": effective_system},
             {"role": "user",   "content": user_text},
         ]
         prompt = self._tokenizer.apply_chat_template(

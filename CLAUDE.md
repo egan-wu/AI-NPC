@@ -23,12 +23,8 @@ change, update `PROJECT_PLAN.md` in the same turn.
       assistant writes samples directly into `data/raw/*.jsonl` files in
       the current session, no API calls or API key needed. Use this for
       smaller targeted batches and quality iteration.
-      **IMPORTANT:** when this path is used, the active Claude model
-      MUST be Haiku-class (`claude-haiku-4-5-20251001` or successor).
-      If the user is running a larger model (Opus/Sonnet), pause and
-      ask them to `/model claude-haiku-4-5-20251001` before drafting
-      sample text. Architectural discussion/planning can stay on the
-      larger model — only the sample drafting itself must be on Haiku.
+      Any Claude model (Haiku, Sonnet, or Opus) may author samples
+      directly in-session — the model restriction has been lifted.
   (2) **Bulk batched generation via Haiku API:** Claude Haiku 4.5
       (`claude-haiku-4-5-20251001`) via the Anthropic Python SDK with
       prompt caching for the persona + few-shot block. Use this when
