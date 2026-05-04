@@ -301,6 +301,7 @@ def chat_loop(
         t_gen0 = time.perf_counter()
         print(f"\n{CYAN}{BOLD}[{npc_name}]{RESET} ", end="", flush=True)
         response_parts: list[str] = []
+        t_first_token: float | None = None
         for chunk in stream_generate(
             model, tokenizer, prompt=prompt,
             max_tokens=max_tokens, sampler=sampler,
@@ -308,20 +309,24 @@ def chat_loop(
         ):
             # mlx_lm >= 0.21 yields GenerationResponse objects; older yields str
             text = chunk.text if hasattr(chunk, "text") else chunk
+            if t_first_token is None:
+                t_first_token = time.perf_counter() - t_gen0  # TTFT
             print(text, end="", flush=True)
             response_parts.append(text)
         response = "".join(response_parts).strip()
         t_gen = time.perf_counter() - t_gen0
+        ttft = t_first_token or t_gen  # fallback if no tokens were produced
 
         if timing:
             timing_tag = (
                 f"{DIM}[guard={t_guard*1000:.0f}ms"
                 f" | mem={t_mem*1000:.0f}ms"
+                f" | ttft={ttft*1000:.0f}ms"
                 f" | gen={t_gen:.1f}s"
                 f" | total={(t_guard+t_mem+t_gen):.1f}s]{RESET}"
             )
         else:
-            timing_tag = f"{DIM}[{t_gen:.1f}s]{RESET}"
+            timing_tag = f"{DIM}[ttft={ttft*1000:.0f}ms | {t_gen:.1f}s]{RESET}"
 
         print(f"\n  {tag} {mem_tag} {p_tag} {timing_tag}\n")
 
