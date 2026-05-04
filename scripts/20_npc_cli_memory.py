@@ -306,8 +306,10 @@ def chat_loop(
             max_tokens=max_tokens, sampler=sampler,
             logits_processors=logit_prs,
         ):
-            print(chunk, end="", flush=True)
-            response_parts.append(chunk)
+            # mlx_lm >= 0.21 yields GenerationResponse objects; older yields str
+            text = chunk.text if hasattr(chunk, "text") else chunk
+            print(text, end="", flush=True)
+            response_parts.append(text)
         response = "".join(response_parts).strip()
         t_gen = time.perf_counter() - t_gen0
 
