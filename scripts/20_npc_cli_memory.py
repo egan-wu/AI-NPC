@@ -24,7 +24,8 @@ Usage:
 
 Key parameters:
     --no-history      Disable in-context sliding window (ChromaDB memory still active)
-    --fresh           Clear this NPC's ChromaDB collections before starting
+    --fresh           Clear this NPC's conversation history (_conv) before starting.
+                      World knowledge (_world) is never touched by --fresh.
     --temp FLOAT      Sampling temperature, default 0.75
     --rep-penalty FLOAT  Repetition penalty, default 1.1
     --n-world INT     World knowledge facts to inject per turn (default 3)
@@ -297,7 +298,7 @@ def main():
     parser.add_argument("--no-history", dest="history", action="store_false",
                         help="Disable in-context sliding window (ChromaDB memory still active)")
     parser.add_argument("--fresh", action="store_true",
-                        help="Wipe this NPC's ChromaDB memory before starting")
+                        help="Clear conversation history before starting (world knowledge is preserved)")
     parser.add_argument("--temp", type=float, default=0.75,
                         help="Sampling temperature (default: 0.75)")
     parser.add_argument("--rep-penalty", type=float, default=1.1,
@@ -323,13 +324,17 @@ def main():
     # Memory
     print(f"{DIM}Initialising memory for {npc_name}...{RESET}", end=" ", flush=True)
     memory = ModularMemory(npc_id=persona_id)
+
     if args.fresh:
-        print(f"\n  {YELLOW}--fresh: wiping existing ChromaDB collections{RESET}")
-        memory.inject_world_knowledge([])       # wipe world knowledge
-        memory._conv.delete(ids=memory._conv.get()["ids"]) if memory._conv.count() > 0 else None
-        memory._turn_counter = 0
-    memory.inject_world_knowledge(world_knowledge)
-    print(f"ready ({len(world_knowledge)} world facts, {memory._conv.count()} stored turns).")
+        cleared = memory.clear_conv()
+        print(f"\n  {YELLOW}--fresh: cleared {cleared} conversation turn(s). World knowledge unchanged.{RESET}")
+
+    # Seed world knowledge from YAML only on first run (no-op if already populated)
+    seeded = memory.seed_world_knowledge(world_knowledge)
+    if seeded:
+        print(f"\n  {DIM}First run: seeded {len(world_knowledge)} world knowledge entries from personas.yaml.{RESET}")
+
+    print(f"ready ({memory.world_count()} world facts, {memory.conv_count()} stored turns).")
 
     # Model
     print(f"{DIM}Loading {MODEL_ID}...{RESET}", end=" ", flush=True)

@@ -5,19 +5,19 @@ Adapted from vendor/AI-NPC-Personality/npc_system/memory_module.py.
 Original design: "Fixed-Persona SLMs with Modular Memory: Scalable NPC Dialogue
 on Consumer Hardware".
 
-Key changes from upstream:
-- Removed TinyLlama / HuggingFace inference coupling (we use MLX Mistral-7B)
-- retrieve_context() returns a plain string ready for prompt injection
-- ChromaDB PersistentClient path defaults to outputs/chroma_db (project-local)
-- NPC world knowledge is loaded from personas.yaml (world_knowledge field)
-
 Two collections per NPC in ChromaDB:
-  {npc_id}_world  — static world knowledge (injected once at startup)
-  {npc_id}_conv   — conversational turns (appended each turn)
+
+  {npc_id}_world  — persistent world knowledge.
+                    Seeded once from personas.yaml on first run (when empty).
+                    Managed directly via 21_manage_world_knowledge.py.
+                    Never wiped by --fresh.
+
+  {npc_id}_conv   — conversational turn history.
+                    Appended each turn during a session.
+                    Cleared by --fresh (start a new conversation).
 
 At inference time, retrieve_context(query) returns the top-k semantically
-relevant facts + past turns as a formatted string that is injected into the
-system prompt.
+relevant facts + past turns as a formatted string injected into the system prompt.
 """
 
 from __future__ import annotations
@@ -63,31 +63,35 @@ class ModularMemory:
             model_name=embedding_model
         )
 
-        self._world  = self._client.get_or_create_collection(
+        self._world = self._client.get_or_create_collection(
             name=f"{npc_id}_world", embedding_function=self._ef
         )
-        self._conv   = self._client.get_or_create_collection(
-            name=f"{npc_id}_conv",  embedding_function=self._ef
+        self._conv = self._client.get_or_create_collection(
+            name=f"{npc_id}_conv", embedding_function=self._ef
         )
         self._turn_counter = self._conv.count()  # resume from existing turns
 
     # ── World Knowledge ───────────────────────────────────────────────────────
 
-    def inject_world_knowledge(self, knowledge_list: List[str]) -> None:
+    def seed_world_knowledge(self, knowledge_list: List[str]) -> bool:
         """
-        (Re-)inject static world knowledge into the world collection.
-        Called once at CLI startup. Wipes and replaces any existing entries
-        so changes in personas.yaml take effect on next run.
+        Seed world knowledge from personas.yaml on first run only.
+        If the _world collection is already populated, this is a no-op.
+
+        Returns True if seeding happened, False if skipped.
         """
         if self._world.count() > 0:
-            existing_ids = self._world.get()["ids"]
-            self._world.delete(ids=existing_ids)
+            return False  # already seeded — do not overwrite
 
         if not knowledge_list:
-            return
+            return False
 
         ids = [f"wk_{i}" for i in range(len(knowledge_list))]
         self._world.add(documents=knowledge_list, ids=ids)
+        return True
+
+    def world_count(self) -> int:
+        return self._world.count()
 
     # ── Conversational Memory ─────────────────────────────────────────────────
 
@@ -97,6 +101,21 @@ class ModularMemory:
         turn_id = f"turn_{self._turn_counter}"
         self._conv.add(documents=[doc], ids=[turn_id])
         self._turn_counter += 1
+
+    def clear_conv(self) -> int:
+        """
+        Wipe the conversational history collection.
+        Called when --fresh is passed to the CLI.
+        Returns the number of turns that were cleared.
+        """
+        count = self._conv.count()
+        if count > 0:
+            self._conv.delete(ids=self._conv.get()["ids"])
+        self._turn_counter = 0
+        return count
+
+    def conv_count(self) -> int:
+        return self._conv.count()
 
     # ── Retrieval ─────────────────────────────────────────────────────────────
 
@@ -135,3 +154,44 @@ class ModularMemory:
                 )
 
         return "\n\n".join(parts)
+
+    # ── World Knowledge CRUD (used by 21_manage_world_knowledge.py) ───────────
+
+    def world_list(self) -> list[dict]:
+        """
+        Return all world knowledge entries as a list of dicts:
+            [{"id": "wk_0", "text": "..."}, ...]
+        sorted by id.
+        """
+        if self._world.count() == 0:
+            return []
+        result = self._world.get()
+        pairs = list(zip(result["ids"], result["documents"]))
+        pairs.sort(key=lambda x: x[0])
+        return [{"id": id_, "text": doc} for id_, doc in pairs]
+
+    def world_add(self, text: str) -> str:
+        """
+        Append a new world knowledge entry. Returns the new entry's id.
+        Uses a monotonically increasing numeric suffix to avoid collisions.
+        """
+        existing_ids = self._world.get()["ids"] if self._world.count() > 0 else []
+        # Find max numeric suffix
+        nums = []
+        for eid in existing_ids:
+            try:
+                nums.append(int(eid.split("_", 1)[1]))
+            except (IndexError, ValueError):
+                pass
+        next_n = (max(nums) + 1) if nums else 0
+        new_id = f"wk_{next_n}"
+        self._world.add(documents=[text], ids=[new_id])
+        return new_id
+
+    def world_update(self, entry_id: str, new_text: str) -> None:
+        """Update the text of an existing world knowledge entry by id."""
+        self._world.update(ids=[entry_id], documents=[new_text])
+
+    def world_delete(self, entry_id: str) -> None:
+        """Delete a world knowledge entry by id."""
+        self._world.delete(ids=[entry_id])
