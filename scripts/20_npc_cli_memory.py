@@ -203,6 +203,7 @@ def chat_loop(
     rep_penalty: float,
     n_world: int,
     n_conv: int,
+    timing: bool = False,
 ):
     print(f"\n{BOLD}{'─'*56}{RESET}")
     print(f"  {BOLD}{CYAN}{npc_name}{RESET}  ·  {location}")
@@ -214,6 +215,8 @@ def chat_loop(
         f"rep_penalty={rep_penalty}",
         f"memory=on (world={n_world}, conv={n_conv})",
     ]
+    if timing:
+        flags.append("timing=on")
     print(f"  {DIM}Settings: {' · '.join(flags)}{RESET}")
     print(f"{BOLD}{'─'*56}{RESET}\n")
 
@@ -249,7 +252,9 @@ def chat_loop(
             break
 
         # Guard classification
+        t_guard0 = time.perf_counter()
         blocked, p = guard.classify(raw)
+        t_guard = time.perf_counter() - t_guard0
         p_tag = f"{DIM}[p={p:.2f}]{RESET}"
 
         if blocked and p >= JAILBREAK_THRESHOLD:
@@ -263,22 +268,34 @@ def chat_loop(
             tag = ""
 
         # Retrieve relevant memory context
+        t_mem0 = time.perf_counter()
         mem_context = memory.retrieve_context(raw, n_world=n_world, n_conv=n_conv)
+        t_mem = time.perf_counter() - t_mem0
         mem_tag = f"{GREEN}[mem]{RESET}" if mem_context else ""
 
         # Build prompt
         current_history = history if use_history else []
         prompt = build_prompt(tokenizer, effective_system, mem_context, current_history, raw)
 
-        t0 = time.time()
+        t_gen0 = time.perf_counter()
         response = generate(
             model, tokenizer, prompt=prompt,
             max_tokens=160, sampler=sampler,
             logits_processors=logit_prs, verbose=False,
         ).strip()
-        elapsed = f"{DIM}[{time.time() - t0:.1f}s]{RESET}"
+        t_gen = time.perf_counter() - t_gen0
 
-        print(f"\n{CYAN}{BOLD}[{npc_name}]{RESET} {response}  {tag} {mem_tag} {p_tag} {elapsed}\n")
+        if timing:
+            timing_tag = (
+                f"{DIM}[guard={t_guard*1000:.0f}ms"
+                f" | mem={t_mem*1000:.0f}ms"
+                f" | gen={t_gen:.1f}s"
+                f" | total={(t_guard+t_mem+t_gen):.1f}s]{RESET}"
+            )
+        else:
+            timing_tag = f"{DIM}[{t_gen:.1f}s]{RESET}"
+
+        print(f"\n{CYAN}{BOLD}[{npc_name}]{RESET} {response}  {tag} {mem_tag} {p_tag} {timing_tag}\n")
 
         # Persist this turn to ChromaDB
         memory.add_turn(raw, response)
@@ -307,6 +324,8 @@ def main():
                         help="World knowledge facts to retrieve per turn (default: 3)")
     parser.add_argument("--n-conv", type=int, default=2,
                         help="Past conversation turns to retrieve per turn (default: 2)")
+    parser.add_argument("--timing", action="store_true",
+                        help="Show per-stage latency breakdown (guard / mem / gen) each turn")
     parser.set_defaults(history=True)
     args = parser.parse_args()
 
@@ -349,6 +368,7 @@ def main():
         rep_penalty=args.rep_penalty,
         n_world=args.n_world,
         n_conv=args.n_conv,
+        timing=args.timing,
     )
 
 

@@ -365,3 +365,63 @@ Phase 2 (RunPod — trigger when Phase 1 eval results are in hand):
   Step 4 → Train both adapters on RunPod
   Step 5 → Eval with LoRA routing mode
 ```
+
+---
+
+## 12. Phase 4 — Memory & Persona Optimization (Next)
+
+After integrating the ChromaDB-backed `ModularMemory` (`src/memory_module.py`)
+and the interactive CLIs (`scripts/20_npc_cli_memory.py`,
+`scripts/21_manage_world_knowledge.py`), the following optimization tracks
+are queued. **Tackle one at a time**, in the order listed within each track;
+recommended overall priority is **A1 → B1 → C1**.
+
+### 12.1 Track A — Retrieval & Memory Quality (RAG layer)
+
+| # | Item | Why | Touches |
+|---|---|---|---|
+| A1 | **MMR retrieval** (Maximal Marginal Relevance) instead of pure top-k in `retrieve_context()` | Similar queries currently hit the same top-k facts → identical context → near-identical responses (observed in Marta room-availability test) | `src/memory_module.py` |
+| A2 | **Conversation summarisation**: every N turns, compress oldest `_conv` chunk into one summary doc using the local Mistral | Avoids `_conv` bloating retrieval as sessions grow long | `src/memory_module.py`, new helper script |
+| A3 | **Importance metadata** on world knowledge (`core` vs `gossip` weight); add to retrieval score | Core facts (room prices, family) should outrank gossip on ambiguous queries | `src/memory_module.py`, `personas.yaml` schema |
+| A4 | **Temporal retrieval for `_conv`**: store `timestamp` metadata, blend "recent K turns" + "semantic top-k" | Pure semantic search loses recency; the model forgets what was just said | `src/memory_module.py` |
+
+### 12.2 Track B — Persona Consistency & Evaluation
+
+| # | Item | Why | Touches |
+|---|---|---|---|
+| B1 | **Persona × trap matrix eval**: extend `04_eval.py` to run all 5 personas against a shared trap set, output per-persona consistency score | Need an objective metric before any of A/C optimizations can be judged | `scripts/04_eval.py`, `data/traps.jsonl` |
+| B2 | **Cross-NPC contamination test**: ask each NPC questions only another NPC should know; flag hallucinations | Validates that `_world` isolation is actually working | new script `scripts/22_cross_npc_eval.py` |
+| B3 | **Response diversity metric**: for clusters of paraphrased queries, compute embedding distance between responses; quantify "repetition" before/after A1 | Turns the qualitative repetition complaint into a number | new script under `scripts/` |
+
+### 12.3 Track C — Phase 2 Fine-tuning (begin on Mac, don't wait for NVIDIA)
+
+| # | Item | Why | Touches |
+|---|---|---|---|
+| C1 | **MLX-LM LoRA per persona** using existing `train.jsonl` | Original PROJECT_PLAN goal; don't need to wait for NVIDIA — Mac MLX is sufficient for r=8 adapters on 1.5–3B base | `scripts/03_train_mlx.py`, `configs/training.yaml` |
+| C2 | **Self-distillation from `_conv` logs**: convert successful in-character exchanges from ChromaDB into additional training samples | Free, persona-faithful data that already passed the guard | new script `scripts/23_distill_from_conv.py` |
+| C3 | **Fine-tuned vs prompt-only A/B**: same trap matrix from B1, run against base+system-prompt and base+adapter; report delta | Justifies the cost of Phase 2 with concrete numbers | extends B1 |
+
+### 12.4 Track D — Guard Hardening
+
+| # | Item | Why | Touches |
+|---|---|---|---|
+| D1 | **Gray-zone sample harvest**: log every input where `0.3 < p < 0.8` from CLI sessions to a file; periodically in-session label and retrain the LR head | Closes the loop on the tiered guard's weakest band | `scripts/10_guard_tiered.py`, `scripts/20_npc_cli_memory.py` |
+| D2 | **Guard verdict in `_conv` metadata**: write `(p, blocked, tag)` alongside each turn in ChromaDB | Enables post-hoc analysis of which inputs triggered jailbreak handling | `src/memory_module.py`, `scripts/20_npc_cli_memory.py` |
+
+### 12.5 Track E — System & Experience
+
+| # | Item | Why | Touches |
+|---|---|---|---|
+| E1 | **Multi-NPC session**: switch persona mid-CLI; shared world events propagate to each NPC's `_world` | Demonstrates the modular-memory design's main upside vs monolithic prompt | `scripts/20_npc_cli_memory.py`, `src/memory_module.py` |
+| E2 | **NPC self-update of `_world`**: when dialogue introduces a new fact (e.g. player name), persist it via `world_add()` | Memory grows organically instead of staying frozen at YAML seed | requires guard + extraction prompt; non-trivial |
+| E3 | **Latency profiling**: instrument guard / retrieval / generate stages, print breakdown per turn | Identify whether RAG or inference is the bottleneck before optimizing either | `scripts/20_npc_cli_memory.py` |
+
+### 12.6 Recommended Execution Order
+
+1. **A1** — solves the observed repetition problem; smallest scope.
+2. **B1** — gives every subsequent change a measurable target.
+3. **C1** — fulfils PROJECT_PLAN's original Phase 2 goal; unblocks C2/C3.
+4. Then pick from **D1 / E1 / A2** based on which pain point dominates after C1.
+
+Each item above should land as its own focused PR-style change with a commit
+referencing its track id (e.g. `feat(memory): A1 — MMR retrieval`).
