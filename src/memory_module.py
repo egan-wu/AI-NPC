@@ -124,20 +124,39 @@ class ModularMemory:
         query: str,
         n_world: int = 3,
         n_conv: int = 2,
+        embedding=None,
     ) -> str:
         """
         Retrieve the most relevant world facts and past conversation turns
         for the given query.
+
+        Parameters
+        ----------
+        query : str
+            Raw user input (used when no pre-computed embedding is supplied).
+        embedding : numpy array, shape (1, dim) or (dim,), optional
+            Pre-computed query embedding from the Guard's shared embedder.
+            When provided, ChromaDB uses query_embeddings instead of query_texts,
+            eliminating a second encode() call per turn.
 
         Returns a formatted string to be injected into the NPC system prompt,
         or an empty string if nothing relevant is found.
         """
         parts: list[str] = []
 
+        # Build ChromaDB query kwargs — prefer pre-computed embedding when available
+        if embedding is not None:
+            # Normalise to 1-D list for ChromaDB: (1, dim) → [dim] → [[dim]]
+            vec = embedding[0] if hasattr(embedding, "ndim") and embedding.ndim == 2 \
+                  else embedding
+            q_kwargs: dict = {"query_embeddings": [vec.tolist()]}
+        else:
+            q_kwargs = {"query_texts": [query]}
+
         # World knowledge
         if self._world.count() > 0:
             n = min(n_world, self._world.count())
-            results = self._world.query(query_texts=[query], n_results=n)
+            results = self._world.query(**q_kwargs, n_results=n)
             docs = results["documents"][0] if results["documents"] else []
             if docs:
                 parts.append("Relevant facts:\n" + "\n".join(f"- {d}" for d in docs))
@@ -145,7 +164,7 @@ class ModularMemory:
         # Conversational memory
         if self._conv.count() > 0:
             n = min(n_conv, self._conv.count())
-            results = self._conv.query(query_texts=[query], n_results=n)
+            results = self._conv.query(**q_kwargs, n_results=n)
             docs = results["documents"][0] if results["documents"] else []
             if docs:
                 # Reverse so they read oldest-first (semantic search is not temporal)

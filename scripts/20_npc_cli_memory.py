@@ -21,6 +21,8 @@ Usage:
     python scripts/20_npc_cli_memory.py -p marta --no-history  # disable in-context history
     python scripts/20_npc_cli_memory.py -p marta --temp 0.9 --rep-penalty 1.15
     python scripts/20_npc_cli_memory.py -p marta --fresh       # wipe ChromaDB for this NPC
+    python scripts/20_npc_cli_memory.py -p marta --timing      # per-stage latency breakdown
+    python scripts/20_npc_cli_memory.py -p marta --max-tokens 100  # shorter responses
 
 Key parameters:
     --no-history      Disable in-context sliding window (ChromaDB memory still active)
@@ -30,6 +32,12 @@ Key parameters:
     --rep-penalty FLOAT  Repetition penalty, default 1.1
     --n-world INT     World knowledge facts to inject per turn (default 3)
     --n-conv INT      Past turns to retrieve per turn (default 2)
+    --max-tokens INT  Max tokens to generate per turn (default 160)
+    --timing          Show per-stage latency: guard / mem / gen each turn
+
+Optimisations active by default:
+    - Shared embedder: Guard and ChromaDB retrieval reuse one encode() per turn
+    - Streaming generation: tokens appear as they are generated
 
 Quit: type  quit / exit / bye  or press Ctrl-C
 """
@@ -54,7 +62,7 @@ _guard_mod = _ilu.module_from_spec(_spec)
 _spec.loader.exec_module(_guard_mod)
 keyword_hit = _guard_mod.keyword_hit
 
-from mlx_lm import load, generate
+from mlx_lm import load, generate, stream_generate
 from mlx_lm.sample_utils import make_sampler, make_logits_processors
 
 from src.memory_module import ModularMemory
@@ -179,10 +187,17 @@ class Guard:
         self._embedder = SentenceTransformer("all-MiniLM-L6-v2")
         print("ready.")
 
-    def classify(self, text: str) -> tuple[bool, float]:
-        """Returns (blocked, p)."""
+    def encode(self, text: str):
+        """Return embedding array of shape (1, dim).
+        Call this once per turn and pass the result to both classify() and
+        memory.retrieve_context() to avoid encoding the same text twice."""
+        return self._embedder.encode([text])
+
+    def classify(self, text: str, embedding=None) -> tuple[bool, float]:
+        """Returns (blocked, p).
+        Pass a pre-computed embedding (from encode()) to skip re-encoding."""
         kw_hit, _ = keyword_hit(text)
-        emb = self._embedder.encode([text])
+        emb = embedding if embedding is not None else self._embedder.encode([text])
         p = float(self._clf.predict_proba(emb)[0][1])
         blocked = kw_hit or p >= self.BLOCK_THRESHOLD
         return blocked, p
@@ -203,6 +218,7 @@ def chat_loop(
     rep_penalty: float,
     n_world: int,
     n_conv: int,
+    max_tokens: int = 160,
     timing: bool = False,
 ):
     print(f"\n{BOLD}{'─'*56}{RESET}")
@@ -214,6 +230,7 @@ def chat_loop(
         f"temp={temperature}",
         f"rep_penalty={rep_penalty}",
         f"memory=on (world={n_world}, conv={n_conv})",
+        f"max_tokens={max_tokens}",
     ]
     if timing:
         flags.append("timing=on")
@@ -251,9 +268,10 @@ def chat_loop(
             print(f"\n{DIM}(You walk away.){RESET}")
             break
 
-        # Guard classification
+        # ── Shared embedding: encode once, reuse for guard + retrieval ──────────
         t_guard0 = time.perf_counter()
-        blocked, p = guard.classify(raw)
+        embedding = guard.encode(raw)                          # ~190ms, shape (1, dim)
+        blocked, p = guard.classify(raw, embedding=embedding)  # <1ms
         t_guard = time.perf_counter() - t_guard0
         p_tag = f"{DIM}[p={p:.2f}]{RESET}"
 
@@ -267,9 +285,11 @@ def chat_loop(
             effective_system = system_prompt
             tag = ""
 
-        # Retrieve relevant memory context
+        # Retrieve memory context (reuses embedding — no second encode())
         t_mem0 = time.perf_counter()
-        mem_context = memory.retrieve_context(raw, n_world=n_world, n_conv=n_conv)
+        mem_context = memory.retrieve_context(
+            raw, n_world=n_world, n_conv=n_conv, embedding=embedding
+        )
         t_mem = time.perf_counter() - t_mem0
         mem_tag = f"{GREEN}[mem]{RESET}" if mem_context else ""
 
@@ -277,12 +297,18 @@ def chat_loop(
         current_history = history if use_history else []
         prompt = build_prompt(tokenizer, effective_system, mem_context, current_history, raw)
 
+        # Streaming generation — tokens appear as they are produced
         t_gen0 = time.perf_counter()
-        response = generate(
+        print(f"\n{CYAN}{BOLD}[{npc_name}]{RESET} ", end="", flush=True)
+        response_parts: list[str] = []
+        for chunk in stream_generate(
             model, tokenizer, prompt=prompt,
-            max_tokens=160, sampler=sampler,
-            logits_processors=logit_prs, verbose=False,
-        ).strip()
+            max_tokens=max_tokens, sampler=sampler,
+            logits_processors=logit_prs,
+        ):
+            print(chunk, end="", flush=True)
+            response_parts.append(chunk)
+        response = "".join(response_parts).strip()
         t_gen = time.perf_counter() - t_gen0
 
         if timing:
@@ -295,7 +321,7 @@ def chat_loop(
         else:
             timing_tag = f"{DIM}[{t_gen:.1f}s]{RESET}"
 
-        print(f"\n{CYAN}{BOLD}[{npc_name}]{RESET} {response}  {tag} {mem_tag} {p_tag} {timing_tag}\n")
+        print(f"\n  {tag} {mem_tag} {p_tag} {timing_tag}\n")
 
         # Persist this turn to ChromaDB
         memory.add_turn(raw, response)
@@ -324,6 +350,8 @@ def main():
                         help="World knowledge facts to retrieve per turn (default: 3)")
     parser.add_argument("--n-conv", type=int, default=2,
                         help="Past conversation turns to retrieve per turn (default: 2)")
+    parser.add_argument("--max-tokens", type=int, default=160,
+                        help="Max tokens to generate per turn (default: 160; try 80-120 for faster responses)")
     parser.add_argument("--timing", action="store_true",
                         help="Show per-stage latency breakdown (guard / mem / gen) each turn")
     parser.set_defaults(history=True)
@@ -368,6 +396,7 @@ def main():
         rep_penalty=args.rep_penalty,
         n_world=args.n_world,
         n_conv=args.n_conv,
+        max_tokens=args.max_tokens,
         timing=args.timing,
     )
 
