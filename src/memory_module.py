@@ -7,17 +7,18 @@ on Consumer Hardware".
 
 Two collections per NPC in ChromaDB:
 
-  {npc_id}_world  — persistent world knowledge.
-                    Seeded once from personas.yaml on first run (when empty).
-                    Managed directly via 21_manage_world_knowledge.py.
-                    Never wiped by --fresh.
+  {npc_id}_persona — persistent personal background facts (L3 of the
+                     hierarchy). Seeded once from personas.yaml on first run.
+                     Managed via 21_manage_persona_lore.py. Never wiped by
+                     --fresh. Renamed from `_world` in Phase 6 to disambiguate
+                     from the new shared `world_global` collection (L0).
 
-  {npc_id}_conv   — conversational turn history.
-                    Appended each turn during a session.
-                    Cleared by --fresh (start a new conversation).
+  {npc_id}_conv    — conversational turn history (L4). Appended each turn.
+                     Cleared by --fresh.
 
 At inference time, retrieve_context(query) returns the top-k semantically
-relevant facts + past turns as a formatted string injected into the system prompt.
+relevant persona facts + past turns. For full-hierarchy retrieval (L0 + L_p
++ L3 + L4), use src/memory_hierarchy.HierarchicalMemory.
 """
 
 from __future__ import annotations
@@ -63,35 +64,35 @@ class ModularMemory:
             model_name=embedding_model
         )
 
-        self._world = self._client.get_or_create_collection(
-            name=f"{npc_id}_world", embedding_function=self._ef
+        self._persona = self._client.get_or_create_collection(
+            name=f"{npc_id}_persona", embedding_function=self._ef
         )
         self._conv = self._client.get_or_create_collection(
             name=f"{npc_id}_conv", embedding_function=self._ef
         )
         self._turn_counter = self._conv.count()  # resume from existing turns
 
-    # ── World Knowledge ───────────────────────────────────────────────────────
+    # ── Persona Lore (L3) ─────────────────────────────────────────────────────
 
-    def seed_world_knowledge(self, knowledge_list: List[str]) -> bool:
+    def seed_persona_lore(self, knowledge_list: List[str]) -> bool:
         """
-        Seed world knowledge from personas.yaml on first run only.
-        If the _world collection is already populated, this is a no-op.
+        Seed persona lore from personas.yaml on first run only.
+        If the _persona collection is already populated, this is a no-op.
 
         Returns True if seeding happened, False if skipped.
         """
-        if self._world.count() > 0:
+        if self._persona.count() > 0:
             return False  # already seeded — do not overwrite
 
         if not knowledge_list:
             return False
 
-        ids = [f"wk_{i}" for i in range(len(knowledge_list))]
-        self._world.add(documents=knowledge_list, ids=ids)
+        ids = [f"pl_{i}" for i in range(len(knowledge_list))]
+        self._persona.add(documents=knowledge_list, ids=ids)
         return True
 
-    def world_count(self) -> int:
-        return self._world.count()
+    def persona_count(self) -> int:
+        return self._persona.count()
 
     # ── Conversational Memory ─────────────────────────────────────────────────
 
@@ -122,7 +123,7 @@ class ModularMemory:
     def retrieve_context(
         self,
         query: str,
-        n_world: int = 3,
+        n_persona: int = 3,
         n_conv: int = 2,
         embedding=None,
     ) -> str:
@@ -153,13 +154,13 @@ class ModularMemory:
         else:
             q_kwargs = {"query_texts": [query]}
 
-        # World knowledge
-        if self._world.count() > 0:
-            n = min(n_world, self._world.count())
-            results = self._world.query(**q_kwargs, n_results=n)
+        # Persona lore
+        if self._persona.count() > 0:
+            n = min(n_persona, self._persona.count())
+            results = self._persona.query(**q_kwargs, n_results=n)
             docs = results["documents"][0] if results["documents"] else []
             if docs:
-                parts.append("Relevant facts:\n" + "\n".join(f"- {d}" for d in docs))
+                parts.append("[About me]\n" + "\n".join(f"- {d}" for d in docs))
 
         # Conversational memory
         if self._conv.count() > 0:
@@ -169,33 +170,25 @@ class ModularMemory:
             if docs:
                 # Reverse so they read oldest-first (semantic search is not temporal)
                 parts.append(
-                    "Related past exchanges:\n" + "\n".join(reversed(docs))
+                    "[Recent conversation]\n" + "\n".join(reversed(docs))
                 )
 
         return "\n\n".join(parts)
 
-    # ── World Knowledge CRUD (used by 21_manage_world_knowledge.py) ───────────
+    # ── Persona Lore CRUD (used by 21_manage_persona_lore.py) ────────────────
 
-    def world_list(self) -> list[dict]:
-        """
-        Return all world knowledge entries as a list of dicts:
-            [{"id": "wk_0", "text": "..."}, ...]
-        sorted by id.
-        """
-        if self._world.count() == 0:
+    def persona_list(self) -> list[dict]:
+        """Return all persona lore entries sorted by id: [{'id', 'text'}, ...]."""
+        if self._persona.count() == 0:
             return []
-        result = self._world.get()
+        result = self._persona.get()
         pairs = list(zip(result["ids"], result["documents"]))
         pairs.sort(key=lambda x: x[0])
         return [{"id": id_, "text": doc} for id_, doc in pairs]
 
-    def world_add(self, text: str) -> str:
-        """
-        Append a new world knowledge entry. Returns the new entry's id.
-        Uses a monotonically increasing numeric suffix to avoid collisions.
-        """
-        existing_ids = self._world.get()["ids"] if self._world.count() > 0 else []
-        # Find max numeric suffix
+    def persona_add(self, text: str) -> str:
+        """Append a new persona lore entry. Returns the new id (pl_<n>)."""
+        existing_ids = self._persona.get()["ids"] if self._persona.count() > 0 else []
         nums = []
         for eid in existing_ids:
             try:
@@ -203,14 +196,16 @@ class ModularMemory:
             except (IndexError, ValueError):
                 pass
         next_n = (max(nums) + 1) if nums else 0
-        new_id = f"wk_{next_n}"
-        self._world.add(documents=[text], ids=[new_id])
+        new_id = f"pl_{next_n}"
+        self._persona.add(documents=[text], ids=[new_id])
         return new_id
 
-    def world_update(self, entry_id: str, new_text: str) -> None:
-        """Update the text of an existing world knowledge entry by id."""
-        self._world.update(ids=[entry_id], documents=[new_text])
+    def persona_update(self, entry_id: str, new_text: str) -> None:
+        self._persona.update(ids=[entry_id], documents=[new_text])
 
-    def world_delete(self, entry_id: str) -> None:
-        """Delete a world knowledge entry by id."""
-        self._world.delete(ids=[entry_id])
+    def persona_delete(self, entry_id: str) -> None:
+        self._persona.delete(ids=[entry_id])
+
+    def persona_all_texts(self) -> list[str]:
+        """Return persona lore entries as plain text list, in id order."""
+        return [e["text"] for e in self.persona_list()]

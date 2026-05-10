@@ -1,0 +1,45 @@
+# configs/world_knowledge.yaml
+#
+# L0 — Global World Knowledge (shared by all NPCs).
+#
+# Every NPC in Ostwick is assumed to know these facts at their own level of
+# understanding. This file is loaded by scripts/23_seed_world_knowledge.py
+# into the ChromaDB collection `world_global` and queried by every NPC at
+# inference time via HierarchicalMemory.
+#
+# Layer position (Phase 6 — Memory Hierarchy):
+#   L0 world_global   ← THIS FILE — all NPCs, immutable lore
+#   L_p player_lore   ← runtime, all NPCs share player's deeds
+#   L3 persona        ← per-NPC personal background (in personas.yaml)
+#   L4 conv           ← per-NPC current session
+#
+# Editing rules:
+#   - Keep each fact ONE SENTENCE, ≤ 25 words. The retriever returns whole
+#     facts; long paragraphs dilute attention.
+#   - Write neutral common knowledge, NOT NPC opinions. Opinions belong in
+#     persona-specific world_knowledge in personas.yaml.
+#   - Re-run scripts/23_seed_world_knowledge.py after editing to sync ChromaDB.
+#   - Re-bake KV cache (22_prebake_cache.py --force) so new facts get baked in.
+
+facts:
+  # ── Geography ───────────────────────────────────────────────────────────────
+  - "Ostwick is a frontier town at the edge of the kingdom, near the Greycrest hills."
+  - "The Greycrest hills lie north of Ostwick; few travel there willingly."
+  - "The capital city lies many days' ride south, beyond the river crossings."
+  - "The road east leads through farmland to the coastal trading cities."
+
+  # ── History & Threats ───────────────────────────────────────────────────────
+  - "The demon lord's forces stir beyond the Greycrest hills; scouts have been sighted."
+  - "An orc raid struck Ostwick thirty years ago; older townfolk remember the dead."
+  - "Wargs — wolflike beasts that hunt in organised packs — have been seen on the north road."
+
+  # ── Factions & Authority ────────────────────────────────────────────────────
+  - "The Town Watch of Ostwick is led by Captain Roderick, a veteran of twenty-five years."
+  - "The Order of the Pale Light is a religious order; their teachings are official but incomplete."
+  - "Father Cain leads the Pale Light temple in Ostwick."
+
+  # ── Economy & Daily Life ────────────────────────────────────────────────────
+  - "Currency: ten copper make one silver; ten silver make one gold."
+  - "The Stag and Thistle, run by Marta, is the only inn in Ostwick."
+  - "Brom the smith works near the east gate; he is known for honest steel."
+  - "Travelling merchants pass through Ostwick weekly; Garrick is among the regulars."

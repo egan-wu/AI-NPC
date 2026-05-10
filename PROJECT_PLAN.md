@@ -425,3 +425,101 @@ recommended overall priority is **A1 → B1 → C1**.
 
 Each item above should land as its own focused PR-style change with a commit
 referencing its track id (e.g. `feat(memory): A1 — MMR retrieval`).
+
+---
+
+## 13. Phase 6 — Memory Hierarchy (multi-layer NPC memory)
+
+### 13.1 Motivation
+
+Phase 1–5 gave each NPC two collections — `{npc_id}_world` and `{npc_id}_conv`.
+This duplicates shared lore across every persona (each NPC re-states "Ostwick
+is a frontier town") and makes a fact like *"the player slew the dragon"*
+impossible to share without re-writing five copies.
+
+Phase 6 splits memory into **four layers** by scope and lifecycle so common
+knowledge is curated once, the player's deeds are visible to every NPC, and
+each NPC's individual background remains distinct.
+
+### 13.2 Layers
+
+| Layer | Collection | Scope | Lifecycle | Maintained by |
+|-------|------------|-------|-----------|---------------|
+| **L0** | `world_global` | all NPCs | static / immutable | `configs/world_knowledge.yaml` → `scripts/23_seed_world_knowledge.py` |
+| **L_p** | `player_lore` | all NPCs | runtime, growing | `scripts/24_manage_player_lore.py` |
+| **L3** | `{npc_id}_persona` | single NPC | static per NPC | `personas.yaml` → `scripts/21_manage_persona_lore.py` |
+| **L4** | `{npc_id}_conv` | single NPC | per session | auto in `scripts/20_npc_cli_memory.py` |
+
+L_p uses a single shared collection (not per-NPC) — every NPC is assumed to
+hear about the player's deeds; gossip propagation between NPCs is deferred to
+a future phase.
+
+### 13.3 Per-turn retrieval format
+
+Each layer is queried independently with its own `k`; results are concatenated
+into one mem_context block injected into the β delta:
+
+```
+[World — common knowledge]      ← L0,  k_world   = 2
+- ...
+[About the traveller]           ← L_p, k_player  = 2
+- ...
+[About me]                      ← L3,  k_persona = 2
+- ...
+[Recent conversation]           ← L4,  k_conv    = 3
+- ...
+```
+
+Default total ≈ 9 chunks ≈ 130 mem_context tokens → ~0.9 s TTFT under β.
+Tunable via `--k-world / --k-player / --k-persona / --k-conv`.
+
+### 13.4 Cache integration with Phase 5 (β / γ)
+
+| Layer | Static? | Cache placement |
+|-------|---------|-----------------|
+| L0 world | yes | baked into γ static prefix |
+| L3 persona | yes | baked into γ static prefix |
+| L_p player_lore | grows at runtime | injected per-turn into β delta |
+| L4 conv | grows per session | extends β delta |
+
+`scripts/22_prebake_cache.py` reads L0 from `world_global` and L3 from
+`personas.yaml` and bakes both into the prefix; metadata records both fact
+counts so a stale cache (e.g. after editing world_knowledge.yaml) is detectable.
+
+### 13.5 New / changed components
+
+| Path | Status | Notes |
+|------|--------|-------|
+| `configs/world_knowledge.yaml` | NEW | L0 source of truth |
+| `src/memory_hierarchy.py` | NEW | `WorldKnowledgeStore`, `PlayerLoreStore`, `HierarchicalMemory` |
+| `scripts/23_seed_world_knowledge.py` | NEW | YAML → ChromaDB sync (idempotent) |
+| `scripts/24_manage_player_lore.py` | NEW | CRUD with timestamp metadata |
+| `src/memory_module.py` | RENAMED | `_world` → `_persona` collection + method names |
+| `scripts/21_manage_world_knowledge.py` | RENAMED | → `21_manage_persona_lore.py` |
+| `scripts/20_npc_cli_memory.py` | UPDATED | uses `HierarchicalMemory`; `--k-*` flags; mem-hits in timing |
+| `scripts/22_prebake_cache.py` | UPDATED | bakes L0 + L3 with section labels |
+
+### 13.6 Migration policy
+
+ChromaDB collection rename `_world → _persona` is **not auto-migrated**. Wipe
+`outputs/chroma_db/` and re-run:
+
+```bash
+rm -rf outputs/chroma_db
+python scripts/23_seed_world_knowledge.py        # L0 from YAML
+python scripts/20_npc_cli_memory.py -p marta     # auto-seeds L3 from personas.yaml
+python scripts/22_prebake_cache.py --all --force # rebake γ caches with L0 + L3
+```
+
+`personas.yaml` remains the source of truth for L3 (the `world_knowledge`
+field is kept under that name to avoid touching dataset-prep scripts;
+semantic mapping is handled in code).
+
+### 13.7 Future extensions (deferred)
+
+- **L1 faction / L2 region** layers — same pattern, gated on `personas.yaml`
+  acquiring `factions:` and `region:` fields.
+- **Cross-NPC episodic propagation** — "Marta heard from Roderick about the
+  wargs"; requires gossip-spread rules. Out of scope now.
+- **Auto-detect player deeds** — post-conversation hook that proposes
+  `player_lore` entries to the user. Manual entry remains the safe default.

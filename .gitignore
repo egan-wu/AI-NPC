@@ -19,3 +19,7 @@ outputs/logs/
 outputs/pilot/
 # Track these specific result files (force-allow even inside outputs/)
 # Use git add -f outputs/eval/ outputs/routing_*.* to initially stage them
+
+# Phase 5/6 runtime artifacts
+outputs/chroma_db/
+outputs/prebaked_cache/

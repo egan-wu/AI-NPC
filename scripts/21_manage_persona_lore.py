@@ -1,14 +1,17 @@
 """
-21_manage_world_knowledge.py — Interactive World Knowledge Manager
+21_manage_persona_lore.py — Interactive Persona Lore Manager (L3)
 
-Manage the persistent world knowledge (_world ChromaDB collection) for any NPC.
-World knowledge survives --fresh resets; only conversation history (_conv) is
-cleared by --fresh.
+Manage the persistent per-NPC persona lore (`{npc_id}_persona` ChromaDB
+collection). Persona lore survives --fresh resets; only conversation history
+(_conv) is cleared by --fresh.
+
+For shared world facts (L0) use scripts/23_seed_world_knowledge.py.
+For player deeds (L_p) use scripts/24_manage_player_lore.py.
 
 Usage:
     source .venv/bin/activate
-    python scripts/21_manage_world_knowledge.py             # pick persona interactively
-    python scripts/21_manage_world_knowledge.py -p marta    # short alias ok
+    python scripts/21_manage_persona_lore.py             # pick persona interactively
+    python scripts/21_manage_persona_lore.py -p marta    # short alias ok
 
 Commands (interactive menu):
     l          List all entries
@@ -111,12 +114,12 @@ def parse_index(raw: str, entries: list[dict]) -> int | None:
 
 def manage_loop(memory: ModularMemory, npc_name: str) -> None:
     print(f"\n{BOLD}{'─'*56}{RESET}")
-    print(f"  World Knowledge Manager — {BOLD}{CYAN}{npc_name}{RESET}")
+    print(f"  Persona Lore Manager — {BOLD}{CYAN}{npc_name}{RESET}")
     print(f"  {DIM}Commands: (l)ist  (a)dd  (e)dit <n>  (d)elete <n>  (q)uit{RESET}")
     print(f"{BOLD}{'─'*56}{RESET}\n")
 
     # Show list on entry
-    entries = memory.world_list()
+    entries = memory.persona_list()
     print_entries(entries)
     print()
 
@@ -140,7 +143,7 @@ def manage_loop(memory: ModularMemory, npc_name: str) -> None:
 
         # ── list ──────────────────────────────────────────────────────────────
         elif cmd in ("l", "list"):
-            entries = memory.world_list()
+            entries = memory.persona_list()
             print()
             print_entries(entries)
             print()
@@ -155,13 +158,13 @@ def manage_loop(memory: ModularMemory, npc_name: str) -> None:
             if not text:
                 print(f"  {DIM}Cancelled.{RESET}")
                 continue
-            new_id = memory.world_add(text)
+            new_id = memory.persona_add(text)
             print(f"  {GREEN}✓ Added [{new_id}]:{RESET} {text}\n")
-            entries = memory.world_list()
+            entries = memory.persona_list()
 
         # ── edit ──────────────────────────────────────────────────────────────
         elif cmd in ("e", "edit"):
-            entries = memory.world_list()
+            entries = memory.persona_list()
             idx = parse_index(rest, entries)
             if idx is None:
                 print(f"  {RED}Usage: e <number>   (e.g. 'e 3'){RESET}")
@@ -173,13 +176,13 @@ def manage_loop(memory: ModularMemory, npc_name: str) -> None:
             if not new_text:
                 print(f"  {DIM}Cancelled.{RESET}")
                 continue
-            memory.world_update(entry["id"], new_text)
+            memory.persona_update(entry["id"], new_text)
             print(f"  {GREEN}✓ Updated [{entry['id']}]:{RESET} {new_text}\n")
-            entries = memory.world_list()
+            entries = memory.persona_list()
 
         # ── delete ────────────────────────────────────────────────────────────
         elif cmd in ("d", "delete", "del", "rm"):
-            entries = memory.world_list()
+            entries = memory.persona_list()
             idx = parse_index(rest, entries)
             if idx is None:
                 print(f"  {RED}Usage: d <number>   (e.g. 'd 2'){RESET}")
@@ -188,9 +191,9 @@ def manage_loop(memory: ModularMemory, npc_name: str) -> None:
             print(f"  {YELLOW}Delete [{entry['id']}]: {entry['text'][:70]}{RESET}")
             confirm = input("  Confirm? (y/N) > ").strip().lower()
             if confirm == "y":
-                memory.world_delete(entry["id"])
+                memory.persona_delete(entry["id"])
                 print(f"  {GREEN}✓ Deleted.{RESET}\n")
-                entries = memory.world_list()
+                entries = memory.persona_list()
             else:
                 print(f"  {DIM}Cancelled.{RESET}")
 
@@ -203,7 +206,7 @@ def manage_loop(memory: ModularMemory, npc_name: str) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Manage world knowledge for an NPC (ChromaDB _world collection)."
+        description="Manage persona lore (L3) for an NPC (ChromaDB _persona collection)."
     )
     parser.add_argument("--persona", "-p", default=None,
                         help="Persona id or alias (e.g. 'marta', 'guard_roderick')")
@@ -218,9 +221,9 @@ def main():
     world_knowledge = persona_data.get("world_knowledge", [])
 
     memory = ModularMemory(npc_id=persona_id)
-    seeded = memory.seed_world_knowledge(world_knowledge)
+    seeded = memory.seed_persona_lore(world_knowledge)
     if seeded:
-        print(f"{DIM}First run: seeded {len(world_knowledge)} entries from personas.yaml.{RESET}")
+        print(f"{DIM}First run: seeded {len(world_knowledge)} persona-lore entries from personas.yaml.{RESET}")
 
     manage_loop(memory, npc_name)
 

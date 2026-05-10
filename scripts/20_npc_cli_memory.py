@@ -1,18 +1,34 @@
 """
-20_npc_cli_memory.py — Interactive NPC CLI with Modular Memory
+20_npc_cli_memory.py — Interactive NPC CLI with Modular Memory + KV Cache
 
-Extension of 19_npc_cli.py that adds ChromaDB-backed modular memory:
-  - World Knowledge: NPC-specific facts retrieved via semantic similarity
-  - Conversational Memory: past dialogue turns retrieved by relevance
+Extension of 19_npc_cli.py that adds ChromaDB-backed modular memory and
+incremental KV-cache inference (方案 β — see PHASE_5_PLAN.md).
+
+Memory hierarchy (Phase 6 — see PROJECT_PLAN.md §Memory Hierarchy):
+  L0  world_global       — common knowledge shared by all NPCs
+  L_p player_lore        — player's deeds, shared by all NPCs (e.g. "slew dragon")
+  L3  {npc_id}_persona   — this NPC's personal background facts
+  L4  {npc_id}_conv      — this session's past dialogue turns
 
 Pipeline:
-  User input
+  Persona selected
+    → make_prompt_cache(model)
+    → stream opening greeting → fills cache with static prefix KV states
+
+  Each user input
     → Tier 1: keyword check  (instant)
     → Tier 2: embedding score via guard_model.pkl
-    → p > 0.90 → inject JAILBREAK_GUARD into system prompt
-    → memory.retrieve_context(user_input) → inject into system prompt
-    → MLX 4-bit Mistral-7B inference → NPC response
+    → p > 0.90 → prepend JAILBREAK_GUARD inside delta context block
+    → memory.retrieve_context(user_input) → included in delta context block
+    → build_turn_delta_tokens()  → ~150 tokens (no BOS)
+    → stream_generate(delta, prompt_cache=cache)  → TTFT ~0.7s
     → memory.add_turn(user_input, response) → persist to ChromaDB
+    → --no-history: trim_prompt_cache back to static prefix length
+
+Prompt topology (β):
+    [INST] system_prompt + opening_cue [/INST] opening_response</s>  ← static, cache
+    [INST] [Memory context]\n{mem}\n\n{user1} [/INST] npc1</s>       ← delta, Turn 1
+    [INST] [Memory context]\n{mem}\n\n{user2} [/INST] npc2</s>       ← delta, Turn 2
 
 Usage:
     source .venv/bin/activate
@@ -25,17 +41,21 @@ Usage:
     python scripts/20_npc_cli_memory.py -p marta --max-tokens 100  # shorter responses
 
 Key parameters:
-    --no-history      Disable in-context sliding window (ChromaDB memory still active)
+    --no-history      Disable in-context history (cache trimmed to static prefix each turn;
+                      ChromaDB semantic memory still active)
     --fresh           Clear this NPC's conversation history (_conv) before starting.
-                      World knowledge (_world) is never touched by --fresh.
+                      L0 world, L_p player_lore, L3 persona are never touched by --fresh.
     --temp FLOAT      Sampling temperature, default 0.75
     --rep-penalty FLOAT  Repetition penalty, default 1.1
-    --n-world INT     World knowledge facts to inject per turn (default 3)
-    --n-conv INT      Past turns to retrieve per turn (default 2)
+    --k-world INT     L0 world facts to inject per turn (default 2)
+    --k-player INT    L_p player-lore facts per turn (default 2)
+    --k-persona INT   L3 persona facts per turn (default 2)
+    --k-conv INT      L4 past turns per turn (default 3)
     --max-tokens INT  Max tokens to generate per turn (default 160)
     --timing          Show per-stage latency: guard / mem / gen each turn
 
 Optimisations active by default:
+    - Incremental KV cache: only ~150 delta tokens prefilled per turn (TTFT ~0.7s)
     - Shared embedder: Guard and ChromaDB retrieval reuse one encode() per turn
     - Streaming generation: tokens appear as they are generated
 
@@ -62,10 +82,12 @@ _guard_mod = _ilu.module_from_spec(_spec)
 _spec.loader.exec_module(_guard_mod)
 keyword_hit = _guard_mod.keyword_hit
 
-from mlx_lm import load, generate, stream_generate
+from mlx_lm import load, stream_generate
 from mlx_lm.sample_utils import make_sampler, make_logits_processors
+from mlx_lm.models.cache import make_prompt_cache, trim_prompt_cache
 
-from src.memory_module import ModularMemory
+from src.memory_hierarchy import HierarchicalMemory
+from src.cache_utils import load_cache, prebaked_path, is_valid as cache_is_valid
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 MODEL_ID      = "mlx-community/Mistral-7B-Instruct-v0.3-4bit"
@@ -137,42 +159,40 @@ def resolve_persona(arg: str, personas: dict) -> str:
     sys.exit(1)
 
 
-def build_prompt(
+def build_turn_delta_tokens(
     tokenizer,
-    system: str,
-    memory_context: str,
-    history: list[dict],
-    new_user: str,
-) -> str:
+    mem_context: str,
+    user_input: str,
+    jailbreak_note: str = "",
+) -> list[int]:
     """
-    Build a multi-turn prompt.
+    Token IDs for one user-turn delta — no BOS token.
 
-    memory_context is injected into the system block (after persona, before
-    conversation) so the model can reference relevant facts when composing
-    each response.
+    Prompt topology within [INST]:
+      [Critical instruction]   ← only if jailbreak detected (p > 0.90)
+      {jailbreak_note}
 
-    Mistral doesn't support "system" role — inject system into the FIRST user turn.
+      [Memory context for this response]   ← only if mem_context non-empty
+      {mem_context}
+
+      {user_input}             ← always last, closest to generation boundary
+
+    The absence of a BOS token is intentional: this delta is appended to an
+    existing KV cache that already holds the static prefix (system_prompt +
+    opening response). Mistral multi-turn format is:
+        <s>[INST] … [/INST]resp</s>[INST] … [/INST]resp</s>…
+    so each subsequent turn starts with [INST] (no <s>).
     """
-    # Compose effective system: persona + retrieved memory context
-    effective_system = system
-    if memory_context:
-        effective_system = f"{system}\n\n[Memory context for this response]\n{memory_context}"
+    parts: list[str] = []
+    if jailbreak_note:
+        parts.append(f"[Critical instruction]\n{jailbreak_note}")
+    if mem_context:
+        parts.append(f"[Memory context for this response]\n{mem_context}")
+    parts.append(user_input)
 
-    messages = []
-    for i, turn in enumerate(history):
-        if turn["role"] == "user" and i == 0:
-            messages.append({"role": "user", "content": f"{effective_system}\n\n{turn['content']}"})
-        else:
-            messages.append(turn)
-
-    if not messages:
-        messages.append({"role": "user", "content": f"{effective_system}\n\n{new_user}"})
-    else:
-        messages.append({"role": "user", "content": new_user})
-
-    return tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
+    content = "\n\n".join(parts)
+    text = f"[INST] {content} [/INST]"
+    return tokenizer.encode(text, add_special_tokens=False)
 
 
 # ── Guard ─────────────────────────────────────────────────────────────────────
@@ -209,51 +229,85 @@ def chat_loop(
     model,
     tokenizer,
     guard: Guard,
-    memory: ModularMemory,
+    memory: HierarchicalMemory,
     system_prompt: str,
     npc_name: str,
     location: str,
     use_history: bool,
     temperature: float,
     rep_penalty: float,
-    n_world: int,
-    n_conv: int,
+    k_world: int,
+    k_player: int,
+    k_persona: int,
+    k_conv: int,
     max_tokens: int = 160,
     timing: bool = False,
+    prebaked_cache_file: "Path | None" = None,
 ):
     print(f"\n{BOLD}{'─'*56}{RESET}")
     print(f"  {BOLD}{CYAN}{npc_name}{RESET}  ·  {location}")
     print(f"  {DIM}Ostwick, frontier town — type 'quit' to leave{RESET}")
 
+    cache_mode = "prebaked" if prebaked_cache_file else "incremental"
     flags = [
         f"history={'on' if use_history else 'off'}",
         f"temp={temperature}",
         f"rep_penalty={rep_penalty}",
-        f"memory=on (world={n_world}, conv={n_conv})",
+        f"memory=on (W={k_world}/L={k_player}/P={k_persona}/C={k_conv})",
         f"max_tokens={max_tokens}",
+        f"kv_cache={cache_mode}",
     ]
     if timing:
         flags.append("timing=on")
     print(f"  {DIM}Settings: {' · '.join(flags)}{RESET}")
     print(f"{BOLD}{'─'*56}{RESET}\n")
 
-    history: list[dict] = []
     sampler   = make_sampler(temp=temperature)
     logit_prs = make_logits_processors(repetition_penalty=rep_penalty)
 
-    # Opening greeting (no memory retrieval — nothing stored yet)
-    opening_user = "(The traveller approaches. Give a short in-character greeting.)"
-    opening_prompt = build_prompt(tokenizer, system_prompt, "", [], opening_user)
-    opening = generate(
-        model, tokenizer, prompt=opening_prompt,
-        max_tokens=80, sampler=sampler,
-        logits_processors=logit_prs, verbose=False,
-    ).strip()
-    print(f"{CYAN}{BOLD}[{npc_name}]{RESET} {opening}\n")
+    # ── Static prefix: build or load KV cache ────────────────────────────────
+    opening_cue = "(The traveller approaches. Give a short in-character greeting.)"
 
-    if use_history:
-        history.append({"role": "user",      "content": opening_user})
-        history.append({"role": "assistant", "content": opening})
+    if prebaked_cache_file is not None:
+        # ── γ path: load pre-baked cache from SSD ────────────────────────────
+        # The cache already contains: system_prompt + all world_knowledge +
+        # opening_cue + opening_response + EOS.  No prefill computation needed.
+        print(f"{DIM}Loading pre-baked KV cache from {prebaked_cache_file.name}...{RESET}",
+              end=" ", flush=True)
+        cache, static_cache_len, prebaked_meta = load_cache(model, prebaked_cache_file)
+        print(f"ready ({static_cache_len} tokens, "
+              f"{prebaked_meta.get('world_facts_count', '?')} world facts baked in).")
+
+        # Display the stored opening (generated during baking, no recompute)
+        opening = prebaked_meta["opening"]
+        print(f"{CYAN}{BOLD}[{npc_name}]{RESET} {opening}\n")
+
+    else:
+        # ── β path: live prefill — stream opening, cache fills during generation
+        opening_input = tokenizer.apply_chat_template(
+            [{"role": "user", "content": f"{system_prompt}\n\n{opening_cue}"}],
+            tokenize=False, add_generation_prompt=True,
+        )
+
+        cache = make_prompt_cache(model)  # empty KV cache for all layers
+
+        print(f"{CYAN}{BOLD}[{npc_name}]{RESET} ", end="", flush=True)
+        opening_parts: list[str] = []
+        for chunk in stream_generate(
+            model, tokenizer,
+            prompt=opening_input,
+            prompt_cache=cache,
+            max_tokens=80, sampler=sampler,
+            logits_processors=logit_prs,
+        ):
+            text = chunk.text if hasattr(chunk, "text") else chunk
+            print(text, end="", flush=True)
+            opening_parts.append(text)
+        print("\n")
+
+        # Offset after static prefix (system + opening_cue + opening + EOS).
+        # Used to trim the cache back to this point when --no-history is active.
+        static_cache_len: int = cache[0].offset
 
     while True:
         try:
@@ -268,42 +322,54 @@ def chat_loop(
             print(f"\n{DIM}(You walk away.){RESET}")
             break
 
-        # ── Shared embedding: encode once, reuse for guard + retrieval ──────────
+        # ── Shared embedding: encode once, reuse for guard + retrieval ────────
         t_guard0 = time.perf_counter()
         embedding = guard.encode(raw)                          # ~190ms, shape (1, dim)
         blocked, p = guard.classify(raw, embedding=embedding)  # <1ms
         t_guard = time.perf_counter() - t_guard0
         p_tag = f"{DIM}[p={p:.2f}]{RESET}"
 
+        # Jailbreak guard is injected into the delta context block (not system,
+        # which is locked in the cache).
         if blocked and p >= JAILBREAK_THRESHOLD:
-            effective_system = system_prompt + JAILBREAK_GUARD
+            jailbreak_note = JAILBREAK_GUARD.strip()
             tag = f"{RED}[jailbreak]{RESET}"
         elif blocked:
-            effective_system = system_prompt
+            jailbreak_note = ""
             tag = f"{DIM}[modern]{RESET}"
         else:
-            effective_system = system_prompt
+            jailbreak_note = ""
             tag = ""
 
-        # Retrieve memory context (reuses embedding — no second encode())
+        # ── Memory retrieval across all 4 layers (single shared embedding) ────
         t_mem0 = time.perf_counter()
-        mem_context = memory.retrieve_context(
-            raw, n_world=n_world, n_conv=n_conv, embedding=embedding
+        mem_context, mem_hits = memory.retrieve_context(
+            raw,
+            k_world=k_world, k_player=k_player,
+            k_persona=k_persona, k_conv=k_conv,
+            embedding=embedding,
         )
         t_mem = time.perf_counter() - t_mem0
-        mem_tag = f"{GREEN}[mem]{RESET}" if mem_context else ""
+        mem_tag = (
+            f"{GREEN}[mem W{mem_hits['world']}/L{mem_hits['player']}"
+            f"/P{mem_hits['persona']}/C{mem_hits['conv']}]{RESET}"
+            if mem_context else ""
+        )
 
-        # Build prompt
-        current_history = history if use_history else []
-        prompt = build_prompt(tokenizer, effective_system, mem_context, current_history, raw)
+        # ── Build delta: only the new user turn (~150 tokens, no BOS) ─────────
+        delta_tokens = build_turn_delta_tokens(
+            tokenizer, mem_context, raw, jailbreak_note=jailbreak_note
+        )
 
-        # Streaming generation — tokens appear as they are produced
+        # ── Streaming generation — extend KV cache with delta + response ──────
         t_gen0 = time.perf_counter()
         print(f"\n{CYAN}{BOLD}[{npc_name}]{RESET} ", end="", flush=True)
         response_parts: list[str] = []
         t_first_token: float | None = None
         for chunk in stream_generate(
-            model, tokenizer, prompt=prompt,
+            model, tokenizer,
+            prompt=delta_tokens,      # only new tokens; cache holds the rest
+            prompt_cache=cache,       # KV states extended in-place
             max_tokens=max_tokens, sampler=sampler,
             logits_processors=logit_prs,
         ):
@@ -317,26 +383,32 @@ def chat_loop(
         t_gen = time.perf_counter() - t_gen0
         ttft = t_first_token or t_gen  # fallback if no tokens were produced
 
+        cache_len = cache[0].offset
         if timing:
             timing_tag = (
                 f"{DIM}[guard={t_guard*1000:.0f}ms"
                 f" | mem={t_mem*1000:.0f}ms"
                 f" | ttft={ttft*1000:.0f}ms"
                 f" | gen={t_gen:.1f}s"
-                f" | total={(t_guard+t_mem+t_gen):.1f}s]{RESET}"
+                f" | total={(t_guard+t_mem+t_gen):.1f}s"
+                f" | cache={cache_len}tok]{RESET}"
             )
         else:
-            timing_tag = f"{DIM}[ttft={ttft*1000:.0f}ms | {t_gen:.1f}s]{RESET}"
+            timing_tag = f"{DIM}[ttft={ttft*1000:.0f}ms | {t_gen:.1f}s | cache={cache_len}tok]{RESET}"
 
         print(f"\n  {tag} {mem_tag} {p_tag} {timing_tag}\n")
 
-        # Persist this turn to ChromaDB
+        # ── Persist this turn to ChromaDB ─────────────────────────────────────
         memory.add_turn(raw, response)
 
-        # Update in-context history
-        if use_history:
-            history.append({"role": "user",      "content": raw})
-            history.append({"role": "assistant", "content": response})
+        # ── Cache management ──────────────────────────────────────────────────
+        if not use_history:
+            # --no-history: trim the KV cache back to the static prefix so each
+            # turn starts without any in-context conversation history.
+            # ChromaDB semantic memory is unaffected.
+            tokens_added = cache[0].offset - static_cache_len
+            if tokens_added > 0:
+                trim_prompt_cache(cache, tokens_added)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -353,14 +425,24 @@ def main():
                         help="Sampling temperature (default: 0.75)")
     parser.add_argument("--rep-penalty", type=float, default=1.1,
                         help="Repetition penalty (default: 1.1, off=1.0)")
-    parser.add_argument("--n-world", type=int, default=3,
-                        help="World knowledge facts to retrieve per turn (default: 3)")
-    parser.add_argument("--n-conv", type=int, default=2,
-                        help="Past conversation turns to retrieve per turn (default: 2)")
+    parser.add_argument("--k-world",   type=int, default=2,
+                        help="L0 world_global facts per turn (default: 2)")
+    parser.add_argument("--k-player",  type=int, default=2,
+                        help="L_p player_lore facts per turn (default: 2)")
+    parser.add_argument("--k-persona", type=int, default=2,
+                        help="L3 persona-lore facts per turn (default: 2)")
+    parser.add_argument("--k-conv",    type=int, default=3,
+                        help="L4 past conversation turns per turn (default: 3)")
     parser.add_argument("--max-tokens", type=int, default=160,
                         help="Max tokens to generate per turn (default: 160; try 80-120 for faster responses)")
     parser.add_argument("--timing", action="store_true",
                         help="Show per-stage latency breakdown (guard / mem / gen) each turn")
+    parser.add_argument("--prebaked-cache", dest="prebaked_cache",
+                        choices=["auto", "on", "off"], default="auto",
+                        help="Use pre-baked KV cache (方案 γ): "
+                             "'auto' = use if available (default), "
+                             "'on' = require it (error if missing), "
+                             "'off' = always use live β prefill")
     parser.set_defaults(history=True)
     args = parser.parse_args()
 
@@ -375,25 +457,52 @@ def main():
     # Guard
     guard = Guard()
 
-    # Memory
+    # Memory hierarchy (L0 + L_p + L3 + L4)
     print(f"{DIM}Initialising memory for {npc_name}...{RESET}", end=" ", flush=True)
-    memory = ModularMemory(npc_id=persona_id)
+    memory = HierarchicalMemory(npc_id=persona_id)
 
     if args.fresh:
         cleared = memory.clear_conv()
-        print(f"\n  {YELLOW}--fresh: cleared {cleared} conversation turn(s). World knowledge unchanged.{RESET}")
+        print(f"\n  {YELLOW}--fresh: cleared {cleared} conversation turn(s). "
+              f"Persona lore, world lore, player lore unchanged.{RESET}")
 
-    # Seed world knowledge from YAML only on first run (no-op if already populated)
-    seeded = memory.seed_world_knowledge(world_knowledge)
+    # Seed L3 persona lore from YAML only on first run (no-op if populated)
+    seeded = memory.seed_persona_lore(world_knowledge)
     if seeded:
-        print(f"\n  {DIM}First run: seeded {len(world_knowledge)} world knowledge entries from personas.yaml.{RESET}")
+        print(f"\n  {DIM}First run: seeded {len(world_knowledge)} persona-lore entries "
+              f"from personas.yaml.{RESET}")
 
-    print(f"ready ({memory.world_count()} world facts, {memory.conv_count()} stored turns).")
+    print(
+        f"ready ("
+        f"world={memory.world.count()}, "
+        f"player_lore={memory.player_lore.count()}, "
+        f"persona={memory.persona_count()}, "
+        f"conv={memory.conv_count()}"
+        f")."
+    )
+    if memory.world.count() == 0:
+        print(f"  {YELLOW}Warning: world_global is empty. "
+              f"Run scripts/23_seed_world_knowledge.py.{RESET}")
 
     # Model
     print(f"{DIM}Loading {MODEL_ID}...{RESET}", end=" ", flush=True)
     model, tokenizer = load(MODEL_ID)
     print("ready.\n")
+
+    # ── Pre-baked cache resolution (方案 γ) ───────────────────────────────────
+    prebaked_file: "Path | None" = None
+    if args.prebaked_cache != "off":
+        candidate = prebaked_path(persona_id, MODEL_ID)
+        if cache_is_valid(candidate, persona_id, MODEL_ID):
+            prebaked_file = candidate
+            print(f"{DIM}Pre-baked cache found: {candidate.name}{RESET}")
+        elif args.prebaked_cache == "on":
+            print(f"{RED}--prebaked-cache on: no valid cache for {npc_name}. "
+                  f"Run 22_prebake_cache.py -p {persona_id} first.{RESET}")
+            sys.exit(1)
+        else:
+            # auto — no cache available, fall through to β live prefill
+            pass
 
     chat_loop(
         model, tokenizer, guard, memory,
@@ -401,10 +510,13 @@ def main():
         use_history=args.history,
         temperature=args.temp,
         rep_penalty=args.rep_penalty,
-        n_world=args.n_world,
-        n_conv=args.n_conv,
+        k_world=args.k_world,
+        k_player=args.k_player,
+        k_persona=args.k_persona,
+        k_conv=args.k_conv,
         max_tokens=args.max_tokens,
         timing=args.timing,
+        prebaked_cache_file=prebaked_file,
     )
 
 
