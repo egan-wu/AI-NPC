@@ -1,0 +1,82 @@
+# Training config — curated Mistral-7B LoRA  (Phase 6 baseline, B1 work)
+#
+# Goal
+# ----
+# Replace mistral_iter100 (which produces degraded output — see commit
+# dba6925 footer) with an adapter trained on the 300-sample curated set
+# (data/processed/train_curated.jsonl, v9+v3+v2, all v1 dropped).
+#
+# Design choices vs prior Mistral runs
+# ------------------------------------
+#   data: data/mlx_curated_mistral (270/30 stratified split, persona-balanced)
+#     - mistral_v1/iter100 used data/mlx_mistral which included v1 raw samples
+#       (terse "Aye, dear" style); that's the suspected cause of voice collapse.
+#   attn-only LoRA (q,k,v,o — no mlp.*):
+#     - v8_attn_only experiment showed attn-only is sufficient for voice on 7B
+#     - cuts ~40 % training time and parameter count
+#     - lower overfitting risk on 270 samples
+#   rank=8, alpha=16:
+#     - mistral_v1 already used these — keep for direct comparison
+#     - 2× alpha/rank is the conventional setting
+#   lr=2.0e-4:
+#     - mistral_v1 used 5.0e-5 (too low for 248 iters → underfit + then
+#       overfit when training continued)
+#     - v9_curated_v9 (Qwen) used 2.0e-4 successfully
+#   iters=150:
+#     - 270 samples / batch 4 ≈ 68 iters/epoch → ~2.2 epochs at 150
+#     - save_every=25 → 6 checkpoints (25/50/75/100/125/150) → easy early-stop
+#     - if voice still underfit at 150, extend to 250 by re-running with --resume
+#   dropout=0.10:
+#     - higher than mistral_v1's 0.05 — defensive against 270-sample overfit
+#
+# Expected
+# --------
+#   ~30-45 min on Apple Silicon (M2/M3, batch 4, attn-only, rank 8)
+#   Train loss should descend smoothly; val loss should flatten ~iter 75-100
+#   then start drifting upward — that's the early-stop signal.
+#
+# After training
+# --------------
+#   1. Inspect outputs/adapters/curated_mistral/0000{25,50,...}_adapters.safetensors
+#   2. Pick the iter with lowest val loss
+#   3. Rename selection to best_adapter (or just point CLI/bake at the iter dir)
+#   4. python scripts/22_prebake_cache.py -p marta \
+#          --adapter outputs/adapters/curated_mistral --force
+#   5. python scripts/20_npc_cli_memory.py -p marta \
+#          --adapter outputs/adapters/curated_mistral --timing
+
+model: "mlx-community/Mistral-7B-Instruct-v0.3-4bit"
+train: true
+data: "data/mlx_curated_mistral"
+
+seed: 42
+fine_tune_type: "lora"
+
+batch_size: 4
+iters: 150
+val_batches: 8           # 30 valid / batch 4 ≈ 7-8 batches per eval
+learning_rate: 2.0e-4
+steps_per_eval: 25
+steps_per_report: 10
+save_every: 25
+
+max_seq_length: 1024
+grad_checkpoint: true
+
+num_layers: -1
+lora_parameters:
+  rank: 8
+  alpha: 16
+  dropout: 0.10
+  scale: 10.0
+  keys:
+    - "self_attn.q_proj"
+    - "self_attn.k_proj"
+    - "self_attn.v_proj"
+    - "self_attn.o_proj"
+
+adapter_path: "outputs/adapters/curated_mistral"
+
+# lr_schedule: cosine decay — mlx-lm picks this up automatically when
+# learning_rate is set without explicit schedule; for the manual form see
+# https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/lora.md
