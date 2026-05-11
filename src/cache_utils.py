@@ -5,20 +5,28 @@ Provides save / load for MLX KVCache objects so that expensive static-prefix
 prefill (system_prompt + all world_knowledge) can be computed ONCE offline and
 reloaded from SSD on subsequent sessions.
 
-File layout per NPC:
-    outputs/prebaked_cache/{npc_id}__{model_id_safe}.safetensors   ← KV arrays
-    outputs/prebaked_cache/{npc_id}__{model_id_safe}.json          ← metadata
+File layout per (NPC, adapter):
+    outputs/prebaked_cache/{npc_id}__{model_safe}__{adapter_id}.safetensors
+    outputs/prebaked_cache/{npc_id}__{model_safe}__{adapter_id}.json
+
+`adapter_id` is the basename of the LoRA adapter directory (e.g.
+"v9_curated_v9"), or the literal "base" when no adapter is loaded.
+Different adapters produce different KV states for the same prompt, so the
+cache filename includes the adapter id and is_valid() checks it.
 
 Metadata keys:
-    npc_id          str   — matches personas.yaml id
-    model_id        str   — full HuggingFace model path
-    offset          int   — number of tokens represented in the cache
-    world_facts_count int — number of world-knowledge facts baked in
-    opening         str   — opening greeting generated during baking
-    baked_at        str   — ISO date-stamp
+    npc_id              str — matches personas.yaml id
+    model_id            str — full HuggingFace model path
+    adapter_id          str — LoRA adapter dir basename, or "base"
+    offset              int — number of tokens represented in the cache
+    world_facts_count   int — L0 facts baked in
+    persona_facts_count int — L3 facts baked in
+    opening             str — opening greeting generated during baking
+    baked_at            str — ISO date-stamp
 
-Compatibility check:  is_valid() confirms npc_id + model_id match before use.
-If the model is updated or world_knowledge changes, re-run 22_prebake_cache.py.
+Compatibility check:  is_valid() confirms npc_id + model_id + adapter_id
+match before use. If any changes (model swap, adapter swap, lore edit),
+re-run 22_prebake_cache.py with --force.
 """
 
 from __future__ import annotations
@@ -134,30 +142,47 @@ def load_cache(model, path: Path) -> tuple[list, int, dict]:
 
 # ── Path helpers ──────────────────────────────────────────────────────────────
 
+def adapter_id_from_path(adapter_path: str | Path | None) -> str:
+    """
+    Compute a short, filename-safe id from a LoRA adapter directory path.
+    Returns "base" when no adapter is supplied.
+    """
+    if not adapter_path:
+        return "base"
+    return Path(adapter_path).name or "base"
+
+
 def prebaked_path(
     npc_id: str,
     model_id: str,
+    adapter_id: str = "base",
     base_dir: Path | None = None,
 ) -> Path:
     """
-    Return the canonical .safetensors path for a (npc_id, model_id) pair.
+    Return the canonical .safetensors path for a (npc_id, model_id, adapter)
+    triple.  Different adapters require separate caches.
 
-    model_id slashes are replaced with underscores to form a valid filename.
     Example:
-        npc_id   = "innkeeper_marta"
-        model_id = "mlx-community/Mistral-7B-Instruct-v0.3-4bit"
-        → outputs/prebaked_cache/innkeeper_marta__mlx-community_Mistral-7B-Instruct-v0.3-4bit.safetensors
+        npc_id     = "innkeeper_marta"
+        model_id   = "mlx-community/Mistral-7B-Instruct-v0.3-4bit"
+        adapter_id = "v9_curated_v9"
+        → outputs/prebaked_cache/innkeeper_marta__mlx-community_Mistral-7B-Instruct-v0.3-4bit__v9_curated_v9.safetensors
     """
     base = Path(base_dir) if base_dir else _PREBAKED_DIR
     safe_model = model_id.replace("/", "_")
-    return base / f"{npc_id}__{safe_model}.safetensors"
+    return base / f"{npc_id}__{safe_model}__{adapter_id}.safetensors"
 
 
-def is_valid(path: Path, npc_id: str, model_id: str) -> bool:
+def is_valid(
+    path: Path,
+    npc_id: str,
+    model_id: str,
+    adapter_id: str = "base",
+) -> bool:
     """
-    Return True if a pre-baked cache file exists and is compatible with the
-    current NPC and model.  Returns False (don't raise) on any mismatch so the
-    caller can fall back to live prefill gracefully.
+    Return True if a pre-baked cache file exists and matches (npc_id,
+    model_id, adapter_id).  Returns False (no raise) on any mismatch so
+    the caller can fall back to live prefill gracefully.
     """
     meta_path = path.with_suffix(".json")
     if not path.exists() or not meta_path.exists():
@@ -165,6 +190,12 @@ def is_valid(path: Path, npc_id: str, model_id: str) -> bool:
     try:
         with open(meta_path, encoding="utf-8") as fh:
             meta = json.load(fh)
-        return meta.get("npc_id") == npc_id and meta.get("model_id") == model_id
+        return (
+            meta.get("npc_id")     == npc_id
+            and meta.get("model_id") == model_id
+            # Backward-compatible: caches baked before adapter_id was added
+            # default to "base"; only a non-base request should reject them.
+            and meta.get("adapter_id", "base") == adapter_id
+        )
     except Exception:
         return False

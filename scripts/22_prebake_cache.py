@@ -59,7 +59,7 @@ from mlx_lm import load, stream_generate
 from mlx_lm.sample_utils import make_sampler, make_logits_processors
 from mlx_lm.models.cache import make_prompt_cache
 
-from src.cache_utils import prebaked_path, save_cache, is_valid
+from src.cache_utils import prebaked_path, save_cache, is_valid, adapter_id_from_path
 from src.memory_hierarchy import HierarchicalMemory, WorldKnowledgeStore
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -120,6 +120,8 @@ def bake_persona(
     tokenizer,
     force: bool,
     world_facts: list[str],
+    adapter_id: str = "base",
+    adapter_path: str | None = None,
 ) -> None:
     """
     Pre-bake the KV cache for one persona.
@@ -139,13 +141,14 @@ def bake_persona(
     delta, not in this prefix.
     """
     npc_name, location = PERSONA_DISPLAY[persona_id]
-    out_path = prebaked_path(persona_id, MODEL_ID)
+    out_path = prebaked_path(persona_id, MODEL_ID, adapter_id=adapter_id)
 
     print(f"\n{BOLD}{'─'*56}{RESET}")
     print(f"  Baking: {BOLD}{CYAN}{npc_name}{RESET}  ·  {location}")
-    print(f"  Output: {DIM}{out_path}{RESET}")
+    print(f"  Adapter: {DIM}{adapter_id}{RESET}")
+    print(f"  Output:  {DIM}{out_path}{RESET}")
 
-    if not force and is_valid(out_path, persona_id, MODEL_ID):
+    if not force and is_valid(out_path, persona_id, MODEL_ID, adapter_id=adapter_id):
         print(f"  {YELLOW}Cache already exists and is valid. Use --force to re-bake.{RESET}")
         return
 
@@ -196,6 +199,8 @@ def bake_persona(
     metadata = {
         "npc_id":              persona_id,
         "model_id":            MODEL_ID,
+        "adapter_id":          adapter_id,
+        "adapter_path":        adapter_path or "",
         "world_facts_count":   len(world_facts),
         "persona_facts_count": len(persona_lore),
         "prefix_tokens":       len(prefix_token_ids),
@@ -217,6 +222,12 @@ def main() -> None:
                         help="Bake all personas sequentially.")
     parser.add_argument("--force", action="store_true",
                         help="Re-bake even if a valid cache already exists.")
+    parser.add_argument("--adapter", default=None,
+                        help="Path to a LoRA adapter directory (e.g. "
+                             "outputs/adapters/v9_curated_v9). "
+                             "Adapter id (dir basename) is recorded in cache "
+                             "metadata; different adapters need separate caches. "
+                             "Omit to bake against the base model.")
     args = parser.parse_args()
 
     if not args.all and args.persona is None:
@@ -239,16 +250,27 @@ def main() -> None:
     else:
         print(f"{DIM}Loaded {len(world_facts)} L0 world facts from world_global.{RESET}")
 
-    print(f"{DIM}Loading {MODEL_ID}...{RESET}", end=" ", flush=True)
-    model, tokenizer = load(MODEL_ID)
+    adapter_id = adapter_id_from_path(args.adapter)
+    if args.adapter:
+        if not Path(args.adapter).exists():
+            print(f"{RED}Adapter path not found: {args.adapter}{RESET}")
+            sys.exit(1)
+        print(f"{DIM}Loading {MODEL_ID} + adapter [{adapter_id}]...{RESET}", end=" ", flush=True)
+        model, tokenizer = load(MODEL_ID, adapter_path=args.adapter)
+    else:
+        print(f"{YELLOW}No --adapter given; baking against base model.{RESET}")
+        print(f"{DIM}Loading {MODEL_ID}...{RESET}", end=" ", flush=True)
+        model, tokenizer = load(MODEL_ID)
     print("ready.")
 
     for pid in targets:
         bake_persona(pid, personas[pid], model, tokenizer,
-                     force=args.force, world_facts=world_facts)
+                     force=args.force, world_facts=world_facts,
+                     adapter_id=adapter_id, adapter_path=args.adapter)
 
-    print(f"\n{BOLD}All done.{RESET}  "
-          f"Run 20_npc_cli_memory.py with --prebaked-cache auto to use the cache.")
+    print(f"\n{BOLD}All done.{RESET}  Adapter id: {DIM}{adapter_id}{RESET}")
+    print(f"  Run: python scripts/20_npc_cli_memory.py -p <name>"
+          f"{' --adapter ' + args.adapter if args.adapter else ''}")
 
 
 if __name__ == "__main__":

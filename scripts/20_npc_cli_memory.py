@@ -87,7 +87,10 @@ from mlx_lm.sample_utils import make_sampler, make_logits_processors
 from mlx_lm.models.cache import make_prompt_cache, trim_prompt_cache
 
 from src.memory_hierarchy import HierarchicalMemory
-from src.cache_utils import load_cache, prebaked_path, is_valid as cache_is_valid
+from src.cache_utils import (
+    load_cache, prebaked_path,
+    is_valid as cache_is_valid, adapter_id_from_path,
+)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 MODEL_ID      = "mlx-community/Mistral-7B-Instruct-v0.3-4bit"
@@ -243,12 +246,16 @@ def chat_loop(
     max_tokens: int = 160,
     timing: bool = False,
     prebaked_cache_file: "Path | None" = None,
+    adapter_label: str = "base",
 ):
     print(f"\n{BOLD}{'─'*56}{RESET}")
     print(f"  {BOLD}{CYAN}{npc_name}{RESET}  ·  {location}")
     print(f"  {DIM}Ostwick, frontier town — type 'quit' to leave{RESET}")
 
     cache_mode = "prebaked" if prebaked_cache_file else "incremental"
+    # adapter id is stamped onto the model object's path attribute when loaded
+    # via mlx_lm; we read it back from the cache file when available, else
+    # show "base"
     flags = [
         f"history={'on' if use_history else 'off'}",
         f"temp={temperature}",
@@ -256,6 +263,7 @@ def chat_loop(
         f"memory=on (W={k_world}/L={k_player}/P={k_persona}/C={k_conv})",
         f"max_tokens={max_tokens}",
         f"kv_cache={cache_mode}",
+        f"adapter={adapter_label}",
     ]
     if timing:
         flags.append("timing=on")
@@ -443,6 +451,11 @@ def main():
                              "'auto' = use if available (default), "
                              "'on' = require it (error if missing), "
                              "'off' = always use live β prefill")
+    parser.add_argument("--adapter", default=None,
+                        help="Path to a LoRA adapter directory (e.g. "
+                             "outputs/adapters/v9_curated_v9). Omit to run "
+                             "the base model (warning printed). γ caches are "
+                             "looked up keyed on the adapter id.")
     parser.set_defaults(history=True)
     args = parser.parse_args()
 
@@ -484,21 +497,37 @@ def main():
         print(f"  {YELLOW}Warning: world_global is empty. "
               f"Run scripts/23_seed_world_knowledge.py.{RESET}")
 
-    # Model
-    print(f"{DIM}Loading {MODEL_ID}...{RESET}", end=" ", flush=True)
-    model, tokenizer = load(MODEL_ID)
+    # Model + optional LoRA adapter
+    adapter_id = adapter_id_from_path(args.adapter)
+    if args.adapter:
+        if not Path(args.adapter).exists():
+            print(f"{RED}Adapter path not found: {args.adapter}{RESET}")
+            sys.exit(1)
+        print(f"{DIM}Loading {MODEL_ID} + adapter [{adapter_id}]...{RESET}",
+              end=" ", flush=True)
+        model, tokenizer = load(MODEL_ID, adapter_path=args.adapter)
+    else:
+        print(f"{YELLOW}No --adapter given; running base model "
+              f"(persona is steered by system_prompt only).{RESET}")
+        print(f"{DIM}Loading {MODEL_ID}...{RESET}", end=" ", flush=True)
+        model, tokenizer = load(MODEL_ID)
     print("ready.\n")
 
     # ── Pre-baked cache resolution (方案 γ) ───────────────────────────────────
+    # Caches are keyed on (npc, model, adapter) — different adapters need
+    # different caches. is_valid() rejects an adapter mismatch automatically.
     prebaked_file: "Path | None" = None
     if args.prebaked_cache != "off":
-        candidate = prebaked_path(persona_id, MODEL_ID)
-        if cache_is_valid(candidate, persona_id, MODEL_ID):
+        candidate = prebaked_path(persona_id, MODEL_ID, adapter_id=adapter_id)
+        if cache_is_valid(candidate, persona_id, MODEL_ID, adapter_id=adapter_id):
             prebaked_file = candidate
             print(f"{DIM}Pre-baked cache found: {candidate.name}{RESET}")
         elif args.prebaked_cache == "on":
-            print(f"{RED}--prebaked-cache on: no valid cache for {npc_name}. "
-                  f"Run 22_prebake_cache.py -p {persona_id} first.{RESET}")
+            print(f"{RED}--prebaked-cache on: no valid cache for "
+                  f"{npc_name} (adapter={adapter_id}). Run:\n"
+                  f"  python scripts/22_prebake_cache.py -p {persona_id}"
+                  f"{' --adapter ' + args.adapter if args.adapter else ''}"
+                  f"{RESET}")
             sys.exit(1)
         else:
             # auto — no cache available, fall through to β live prefill
@@ -517,6 +546,7 @@ def main():
         max_tokens=args.max_tokens,
         timing=args.timing,
         prebaked_cache_file=prebaked_file,
+        adapter_label=adapter_id,
     )
 
 
