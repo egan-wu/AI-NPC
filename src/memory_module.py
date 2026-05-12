@@ -155,7 +155,7 @@ class ModularMemory:
             q_kwargs = {"query_texts": [query]}
 
         # Persona lore
-        if self._persona.count() > 0:
+        if n_persona > 0 and self._persona.count() > 0:
             n = min(n_persona, self._persona.count())
             results = self._persona.query(**q_kwargs, n_results=n)
             docs = results["documents"][0] if results["documents"] else []
@@ -163,7 +163,7 @@ class ModularMemory:
                 parts.append("[About me]\n" + "\n".join(f"- {d}" for d in docs))
 
         # Conversational memory
-        if self._conv.count() > 0:
+        if n_conv > 0 and self._conv.count() > 0:
             n = min(n_conv, self._conv.count())
             results = self._conv.query(**q_kwargs, n_results=n)
             docs = results["documents"][0] if results["documents"] else []

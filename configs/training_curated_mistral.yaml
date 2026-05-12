@@ -18,10 +18,13 @@
 #   rank=8, alpha=16:
 #     - mistral_v1 already used these — keep for direct comparison
 #     - 2× alpha/rank is the conventional setting
-#   lr=2.0e-4:
-#     - mistral_v1 used 5.0e-5 (too low for 248 iters → underfit + then
-#       overfit when training continued)
-#     - v9_curated_v9 (Qwen) used 2.0e-4 successfully
+#   lr=5.0e-5:
+#     - first attempt used 2.0e-4 (extrapolated from v9_curated_v9 Qwen 1.5B);
+#       Mistral-7B is 5× larger and 2e-4 caused gradient instability —
+#       val loss went 3.27 → 10.96 at iter 25, classic "explosion" pattern.
+#       Run killed at iter 50.
+#     - mistral_v1 used 5e-5 successfully (its quality issue was data, not LR);
+#       5e-5 is the safe Mistral-7B LoRA value documented across MLX recipes.
 #   iters=150:
 #     - 270 samples / batch 4 ≈ 68 iters/epoch → ~2.2 epochs at 150
 #     - save_every=25 → 6 checkpoints (25/50/75/100/125/150) → easy early-stop
@@ -55,7 +58,7 @@ fine_tune_type: "lora"
 batch_size: 4
 iters: 150
 val_batches: 8           # 30 valid / batch 4 ≈ 7-8 batches per eval
-learning_rate: 2.0e-4
+learning_rate: 5.0e-5
 steps_per_eval: 25
 steps_per_report: 10
 save_every: 25

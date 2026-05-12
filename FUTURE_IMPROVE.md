@@ -12,7 +12,7 @@ plan (`PHASE_X_PLAN.md`) and link the resulting commit here.
 
 ## 0. Critical findings (verified during 2026-05-10 review)
 
-### CR1 — LoRA adapters never reached interactive CLI ⚠️ (wiring fixed, retrain pending)
+### CR1 — LoRA adapters never reached interactive CLI ✅ (resolved 2026-05-12)
 
 `scripts/19_npc_cli.py`, `20_npc_cli_memory.py`, `22_prebake_cache.py` all
 called `mlx_lm.load(MODEL_ID)` with **no `adapter_path`**. Every "Marta"
@@ -36,6 +36,24 @@ steered only by `system_prompt`** — none of the trained adapters under
   - `scripts/prep_curated_mistral.py`
   Run with: `python scripts/03_train_mlx.py --config configs/training_curated_mistral.yaml`
   Expected: 30–45 min on Apple Silicon, 6 checkpoints at iter 25/50/…/150.
+
+- **2026-05-12** — Training run #1 (lr=2e-4) exploded — val loss 3.27 → 10.96
+  at iter 25. Root cause: 2e-4 extrapolated from Qwen 1.5B was too high for
+  Mistral 7B. Killed at iter 50.
+- **2026-05-12** — Training run #2 (lr=5e-5) **succeeded**. Val loss:
+  iter 50/75/100/125/150 → 0.405/0.404/0.400/**0.397**/0.410. Best
+  checkpoint **iter 125** (val 0.397). Iter 150 starts overfitting
+  (val rebounds while train continues descending to 0.254).
+  Canonical adapter saved at `outputs/adapters/curated_mistral_iter125/`.
+- **2026-05-12** — Interactive smoke test confirms LoRA voice is excellent
+  with all mem layers OFF (`--k-world 0 --k-player 0 --k-persona 0 --k-conv 0`):
+  - "Aye, *nods slowly* I'm Marta—the innkeeper..."
+  - "Wi-what? You're speaking oddly. I think you've had one too many at the
+    merchant's stall, mate..." (anachronism handling perfect)
+  However, with γ cache + L0/L3 baked in, Marta confuses her identity with
+  Wenric/Garrick. This is the **B3 memory-bleed** issue (LoRA trained on
+  `system + user → assistant` only — never saw labelled `[World]/[About me]`
+  context blocks). B1 is functionally done; B3 is the next gate.
 
 ---
 
@@ -70,9 +88,9 @@ steered only by `system_prompt`** — none of the trained adapters under
 
 | # | Gap | Direction | Impact / Effort |
 |---|-----|-----------|-----------------|
-| **B1** | Base Mistral without LoRA → voice not deeply internalised (= CR1 / F1) | After F1 lands, re-run trap eval to quantify voice-consistency improvement vs base | **5 / 2** ⭐⭐⭐ |
+| ~~B1~~ | ✅ DONE 2026-05-12 — curated_mistral_iter125 adapter delivers strong voice ("Aye, *nods slowly* I'm Marta") in pure-LoRA mode | Next: B3 (memory bleed under labelled context) | — |
 | **B2** | NPC quotes retrieved facts verbatim — "Stag and Thistle has eight rooms, a common room and a stable" — breaks immersion | (a) `system_prompt` add: "Use facts as inspiration; never quote them verbatim"; (b) train 10–20 paraphrase-style samples; (c) optionally LLM-rewrite retrieved facts before injection (latency cost) | 4 / 3 |
-| **B3** | Memory bleed — NPC blurts player_lore unprompted ("Hello stranger! I hear you slew the dragon!") | Two paths: (a) `system_prompt` rule: "Mention these only when contextually appropriate"; (b) gate L_p retrieval — only inject when user message contains keyword overlap with player_lore facts | 4 / 2 |
+| **B3** | Memory bleed — LoRA trained on `system + user → assistant` only. With γ cache (L0+L3 baked) Marta confuses her own identity with Wenric/Garrick because she's never seen labelled `[World]/[About me]` blocks. Verified 2026-05-12. Three paths: **(A) `system_prompt` guardrail** ("Facts below are YOUR memories; you remain Marta") — cheapest, try first. (B) Retrain LoRA with 5–10 mem-aware samples — most principled. (C) Gating: inject L0/L3 only when query has keyword overlap. | **5 / 2** ⭐⭐⭐ NEXT |
 | B4 | No emotional / relationship state — Marta is identical to a regular vs a stranger | `relationship_state.yaml` per-NPC: `{trust: 0–100, mood: ...}`; LLM updates after each turn; injected into per-turn delta; player actions adjust trust | 5 / 4 |
 | B5 | Anachronism reactions identical across personas (Lily and Wenric should react very differently) | Training data already encodes this (v3/v9 samples differ); base model loses it — solving B1 should fix this for free | 3 / 0 (with B1) |
 | **B6** | No graceful "I don't know" — retrieval miss leads to confabulation | (a) `system_prompt`: "If the answer isn't in the facts above, admit you don't know in character"; (b) seed 5–10 grounding samples in training data | 4 / 2 |
@@ -126,3 +144,8 @@ steered only by `system_prompt`** — none of the trained adapters under
   mistral_iter100 confirmed broken (raw v1 data contamination).
   Curated Mistral retrain staged (config + prep script + data split ready).
   B1 awaiting training execution.
+- **2026-05-12** — B1 done. curated_mistral_iter125 trained on the
+  300-sample curated set delivers excellent voice in pure-LoRA mode.
+  New gate identified: B3 memory bleed — labelled mem-hierarchy context
+  confuses identity. Promoted to next ⭐⭐⭐ task. Path A (system_prompt
+  guardrail) recommended first.
