@@ -5,6 +5,10 @@ __pycache__/
 venv/
 data/raw/
 data/processed/
+# MLX training splits — regenerable from data/processed/
+data/mlx_*/
+# local Claude Code settings / cache
+.claude/
 .DS_Store
 
 # ── outputs: ignore large artifacts, track eval results ──────────────────────
