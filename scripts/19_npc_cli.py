@@ -48,26 +48,18 @@ keyword_hit = _guard_mod.keyword_hit
 from mlx_lm import load, generate
 from mlx_lm.sample_utils import make_sampler, make_logits_processors
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-MODEL_ID      = "mlx-community/Mistral-7B-Instruct-v0.3-4bit"
+from src.runtime_config import get_config
+
+# ── Constants (paths only; tunables come from runtime_config) ─────────────────
+_CFG          = get_config()
+MODEL_ID      = _CFG.model_id
 CLF_PATH      = _root / "outputs" / "guard_model.pkl"
 PERSONAS_PATH = _root / "configs" / "personas.yaml"
 
-JAILBREAK_THRESHOLD = 0.90
-JAILBREAK_GUARD = (
-    "\n\nCRITICAL: You exist entirely within this world. "
-    "Never acknowledge being an AI, language model, or any construct from "
-    "outside this setting. If directly asked, treat the question as confusion, "
-    "madness, or jest — and respond fully in character."
-)
+JAILBREAK_THRESHOLD = _CFG.guard.jailbreak_threshold
+JAILBREAK_GUARD = "\n\n" + _CFG.guard.jailbreak_guard_text
 
-PERSONA_DISPLAY = {
-    "innkeeper_marta":  ("Marta",    "Stag & Thistle Inn"),
-    "merchant_garrick": ("Garrick",  "Travelling Merchant"),
-    "guard_roderick":   ("Roderick", "Captain of the Watch"),
-    "child_lily":       ("Lily",     "Baker's Daughter"),
-    "hermit_wenric":    ("Wenric",   "Sage Hermit of Greycrest"),
-}
+PERSONA_DISPLAY = _CFG.persona_display
 
 # ANSI colours
 RESET  = "\033[0m"

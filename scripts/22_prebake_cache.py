@@ -61,18 +61,13 @@ from mlx_lm.models.cache import make_prompt_cache
 
 from src.cache_utils import prebaked_path, save_cache, is_valid, adapter_id_from_path
 from src.memory_hierarchy import HierarchicalMemory, WorldKnowledgeStore
+from src.runtime_config import get_config
 
-# ── Constants ──────────────────────────────────────────────────────────────────
-MODEL_ID      = "mlx-community/Mistral-7B-Instruct-v0.3-4bit"
+# ── Constants (paths only; tunables come from runtime_config) ─────────────────
+_CFG          = get_config()
+MODEL_ID      = _CFG.model_id
 PERSONAS_PATH = _root / "configs" / "personas.yaml"
-
-PERSONA_DISPLAY = {
-    "innkeeper_marta":  ("Marta",    "Stag & Thistle Inn"),
-    "merchant_garrick": ("Garrick",  "Travelling Merchant"),
-    "guard_roderick":   ("Roderick", "Captain of the Watch"),
-    "child_lily":       ("Lily",     "Baker's Daughter"),
-    "hermit_wenric":    ("Wenric",   "Sage Hermit of Greycrest"),
-}
+PERSONA_DISPLAY = _CFG.persona_display
 
 # ANSI colours
 RESET  = "\033[0m"

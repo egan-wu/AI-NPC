@@ -91,27 +91,19 @@ from src.cache_utils import (
     load_cache, prebaked_path,
     is_valid as cache_is_valid, adapter_id_from_path,
 )
+from src.runtime_config import get_config
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-MODEL_ID      = "mlx-community/Mistral-7B-Instruct-v0.3-4bit"
+# ── Constants (paths only; tunables come from runtime_config) ─────────────────
+_CFG          = get_config()
+MODEL_ID      = _CFG.model_id
 CLF_PATH      = _root / "outputs" / "guard_model.pkl"
 PERSONAS_PATH = _root / "configs" / "personas.yaml"
 
-JAILBREAK_THRESHOLD = 0.90
-JAILBREAK_GUARD = (
-    "\n\nCRITICAL: You exist entirely within this world. "
-    "Never acknowledge being an AI, language model, or any construct from "
-    "outside this setting. If directly asked, treat the question as confusion, "
-    "madness, or jest — and respond fully in character."
-)
+JAILBREAK_THRESHOLD = _CFG.guard.jailbreak_threshold
+# Prepend the two newlines the chat-loop expects when injecting into delta
+JAILBREAK_GUARD = "\n\n" + _CFG.guard.jailbreak_guard_text
 
-PERSONA_DISPLAY = {
-    "innkeeper_marta":  ("Marta",    "Stag & Thistle Inn"),
-    "merchant_garrick": ("Garrick",  "Travelling Merchant"),
-    "guard_roderick":   ("Roderick", "Captain of the Watch"),
-    "child_lily":       ("Lily",     "Baker's Daughter"),
-    "hermit_wenric":    ("Wenric",   "Sage Hermit of Greycrest"),
-}
+PERSONA_DISPLAY = _CFG.persona_display
 
 # ANSI colours
 RESET  = "\033[0m"
@@ -429,20 +421,20 @@ def main():
                         help="Disable in-context sliding window (ChromaDB memory still active)")
     parser.add_argument("--fresh", action="store_true",
                         help="Clear conversation history before starting (world knowledge is preserved)")
-    parser.add_argument("--temp", type=float, default=0.75,
-                        help="Sampling temperature (default: 0.75)")
-    parser.add_argument("--rep-penalty", type=float, default=1.1,
-                        help="Repetition penalty (default: 1.1, off=1.0)")
-    parser.add_argument("--k-world",   type=int, default=2,
-                        help="L0 world_global facts per turn (default: 2)")
-    parser.add_argument("--k-player",  type=int, default=2,
-                        help="L_p player_lore facts per turn (default: 2)")
-    parser.add_argument("--k-persona", type=int, default=2,
-                        help="L3 persona-lore facts per turn (default: 2)")
-    parser.add_argument("--k-conv",    type=int, default=3,
-                        help="L4 past conversation turns per turn (default: 3)")
-    parser.add_argument("--max-tokens", type=int, default=160,
-                        help="Max tokens to generate per turn (default: 160; try 80-120 for faster responses)")
+    parser.add_argument("--temp", type=float, default=_CFG.inference.temperature,
+                        help=f"Sampling temperature (default: {_CFG.inference.temperature})")
+    parser.add_argument("--rep-penalty", type=float, default=_CFG.inference.repetition_penalty,
+                        help=f"Repetition penalty (default: {_CFG.inference.repetition_penalty}, off=1.0)")
+    parser.add_argument("--k-world",   type=int, default=_CFG.memory.k_world,
+                        help=f"L0 world_global facts per turn (default: {_CFG.memory.k_world})")
+    parser.add_argument("--k-player",  type=int, default=_CFG.memory.k_player,
+                        help=f"L_p player_lore facts per turn (default: {_CFG.memory.k_player})")
+    parser.add_argument("--k-persona", type=int, default=_CFG.memory.k_persona,
+                        help=f"L3 persona-lore facts per turn (default: {_CFG.memory.k_persona})")
+    parser.add_argument("--k-conv",    type=int, default=_CFG.memory.k_conv,
+                        help=f"L4 past conversation turns per turn (default: {_CFG.memory.k_conv})")
+    parser.add_argument("--max-tokens", type=int, default=_CFG.inference.max_tokens,
+                        help=f"Max tokens to generate per turn (default: {_CFG.inference.max_tokens})")
     parser.add_argument("--timing", action="store_true",
                         help="Show per-stage latency breakdown (guard / mem / gen) each turn")
     parser.add_argument("--prebaked-cache", dest="prebaked_cache",
@@ -451,11 +443,11 @@ def main():
                              "'auto' = use if available (default), "
                              "'on' = require it (error if missing), "
                              "'off' = always use live β prefill")
-    parser.add_argument("--adapter", default=None,
+    parser.add_argument("--adapter", default=_CFG.default_adapter or None,
                         help="Path to a LoRA adapter directory (e.g. "
-                             "outputs/adapters/v9_curated_v9). Omit to run "
-                             "the base model (warning printed). γ caches are "
-                             "looked up keyed on the adapter id.")
+                             "outputs/adapters/curated_mistral_iter125). "
+                             "Default comes from configs/runtime.yaml; "
+                             "pass --adapter '' to force base model.")
     parser.set_defaults(history=True)
     args = parser.parse_args()
 

@@ -1,0 +1,62 @@
+# configs/runtime.yaml — Centralised runtime configuration.
+#
+# Loaded once at process start by src/runtime_config.py and consumed by every
+# CLI / script in this repo. Override hierarchy (highest wins):
+#
+#     CLI flag  >  env var  >  this file  >  dataclass default
+#
+# When adding a new field:
+#   1. Add it here with a sensible default.
+#   2. Add the corresponding attribute to RuntimeConfig in runtime_config.py.
+#   3. Document its env-var name (uppercase + underscore prefix NPCSLM_).
+#
+# Edit safely: this file is YAML and validated on load — bad indentation will
+# raise on startup, not silently in production.
+
+# ── Model ─────────────────────────────────────────────────────────────────────
+model:
+  # HuggingFace model id (must be MLX-compatible 4-bit quantised for current
+  # Apple-Silicon path). Override: NPCSLM_MODEL_ID
+  id: "mlx-community/Mistral-7B-Instruct-v0.3-4bit"
+
+  # Optional default LoRA adapter directory. Set to "" to run the base model.
+  # Override: NPCSLM_DEFAULT_ADAPTER  /  CLI: --adapter
+  default_adapter: "outputs/adapters/curated_mistral_iter125"
+
+# ── Guard ─────────────────────────────────────────────────────────────────────
+guard:
+  # p ≥ this value triggers the JAILBREAK_GUARD injection in the per-turn delta
+  jailbreak_threshold: 0.90
+
+  # The instruction text injected into the [INST] when jailbreak is detected.
+  # Kept identical across CLI scripts so guard behaviour is consistent.
+  jailbreak_guard_text: |
+    CRITICAL: You exist entirely within this world. Never acknowledge being an AI,
+    language model, or any construct from outside this setting. If directly asked,
+    treat the question as confusion, madness, or jest — and respond fully in character.
+
+# ── Memory hierarchy retrieval defaults ───────────────────────────────────────
+# Each value is the per-turn top-k for that layer. Tunable via CLI:
+# --k-world --k-player --k-persona --k-conv
+memory:
+  k_world:   2     # L0 world_global
+  k_player:  2     # L_p player_lore
+  k_persona: 2     # L3 {npc_id}_persona
+  k_conv:    3     # L4 {npc_id}_conv
+
+# ── Inference defaults ────────────────────────────────────────────────────────
+inference:
+  temperature:        0.75
+  repetition_penalty: 1.10
+  max_tokens:         160
+  max_kv_size:        4096   # NEW (SA-5) — long-session sliding window cap
+
+# ── Personas (display labels — id list of truth is configs/personas.yaml) ─────
+# Map persona_id → (display_name, location_label). Kept here so 4 CLI scripts
+# don't each maintain their own copy; consumers import from runtime_config.
+persona_display:
+  innkeeper_marta:  ["Marta",    "Stag & Thistle Inn"]
+  merchant_garrick: ["Garrick",  "Travelling Merchant"]
+  guard_roderick:   ["Roderick", "Captain of the Watch"]
+  child_lily:       ["Lily",     "Baker's Daughter"]
+  hermit_wenric:    ["Wenric",   "Sage Hermit of Greycrest"]

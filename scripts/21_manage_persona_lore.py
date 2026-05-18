@@ -33,6 +33,7 @@ _root = Path(__file__).parent.parent
 sys.path.insert(0, str(_root))
 
 from src.memory_module import ModularMemory
+from src.runtime_config import get_config
 
 PERSONAS_PATH = _root / "configs" / "personas.yaml"
 
@@ -45,13 +46,7 @@ RED    = "\033[91m"
 DIM    = "\033[2m"
 GREEN  = "\033[92m"
 
-PERSONA_DISPLAY = {
-    "innkeeper_marta":  ("Marta",    "Stag & Thistle Inn"),
-    "merchant_garrick": ("Garrick",  "Travelling Merchant"),
-    "guard_roderick":   ("Roderick", "Captain of the Watch"),
-    "child_lily":       ("Lily",     "Baker's Daughter"),
-    "hermit_wenric":    ("Wenric",   "Sage Hermit of Greycrest"),
-}
+PERSONA_DISPLAY = get_config().persona_display
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
