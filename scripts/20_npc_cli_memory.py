@@ -92,6 +92,9 @@ from src.cache_utils import (
     is_valid as cache_is_valid, adapter_id_from_path,
 )
 from src.runtime_config import get_config
+from src.logging_config import get_logger
+
+log = get_logger(__name__)
 
 # ── Constants (paths only; tunables come from runtime_config) ─────────────────
 _CFG          = get_config()
@@ -514,6 +517,9 @@ def main():
         if cache_is_valid(candidate, persona_id, MODEL_ID, adapter_id=adapter_id):
             prebaked_file = candidate
             print(f"{DIM}Pre-baked cache found: {candidate.name}{RESET}")
+            log.info("Pre-baked cache hit", extra={
+                "npc": persona_id, "adapter": adapter_id, "cache_file": candidate.name,
+            })
         elif args.prebaked_cache == "on":
             print(f"{RED}--prebaked-cache on: no valid cache for "
                   f"{npc_name} (adapter={adapter_id}). Run:\n"
@@ -523,7 +529,8 @@ def main():
             sys.exit(1)
         else:
             # auto — no cache available, fall through to β live prefill
-            pass
+            log.info("Pre-baked cache miss; falling back to β live prefill",
+                     extra={"npc": persona_id, "adapter": adapter_id})
 
     chat_loop(
         model, tokenizer, guard, memory,
