@@ -244,6 +244,7 @@ def chat_loop(
     timing: bool = False,
     prebaked_cache_file: "Path | None" = None,
     adapter_label: str = "base",
+    max_kv_size: int = 4096,
 ):
     print(f"\n{BOLD}{'─'*56}{RESET}")
     print(f"  {BOLD}{CYAN}{npc_name}{RESET}  ·  {location}")
@@ -437,6 +438,36 @@ def chat_loop(
             tokens_added = cache[0].offset - static_cache_len
             if tokens_added > 0:
                 trim_prompt_cache(cache, tokens_added)
+        else:
+            # SA-5 sliding-window cap: protect against unbounded KV growth.
+            #
+            # When cache[0].offset > max_kv_size, we trim. The static prefix
+            # (system + L0 + L3 + opening, length = static_cache_len) is
+            # sacred — trimming into it would corrupt identity / world facts.
+            #
+            # KNOWN LIMITATION (PoC): mlx_lm.trim_prompt_cache drops the MOST
+            # RECENT n tokens, not the oldest. True sliding-window (keep
+            # static + recent K turns, drop middle) requires layer-level
+            # array slicing — left for SA-5.v2. For now, when we exceed the
+            # cap, we drop ALL accumulated dialogue back to static_cache_len.
+            # ChromaDB conv collection still holds the turns so semantic
+            # retrieval can pull them back; only the in-context chain breaks
+            # at that boundary. A WARN log makes the event visible.
+            current_offset = cache[0].offset
+            if current_offset > max_kv_size:
+                tokens_trimmed = current_offset - static_cache_len
+                trim_prompt_cache(cache, tokens_trimmed)
+                log.warning(
+                    "KV cache exceeded max_kv_size; reset to static prefix",
+                    extra={
+                        "old_offset":     current_offset,
+                        "new_offset":     cache[0].offset,
+                        "max_kv_size":    max_kv_size,
+                        "tokens_trimmed": tokens_trimmed,
+                        "session_id":     metrics.session_id,
+                        "turn_idx":       metrics._turn_idx - 1,
+                    },
+                )
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -463,6 +494,11 @@ def main():
                         help=f"L4 past conversation turns per turn (default: {_CFG.memory.k_conv})")
     parser.add_argument("--max-tokens", type=int, default=_CFG.inference.max_tokens,
                         help=f"Max tokens to generate per turn (default: {_CFG.inference.max_tokens})")
+    parser.add_argument("--max-kv-size", type=int, default=_CFG.inference.max_kv_size,
+                        help=f"Max KV cache size before sliding-window trim "
+                             f"(default: {_CFG.inference.max_kv_size}). When the "
+                             f"cache exceeds this, dialogue history (NOT the "
+                             f"static prefix) is trimmed and the event is logged.")
     parser.add_argument("--timing", action="store_true",
                         help="Show per-stage latency breakdown (guard / mem / gen) each turn")
     parser.add_argument("--prebaked-cache", dest="prebaked_cache",
@@ -571,6 +607,7 @@ def main():
         timing=args.timing,
         prebaked_cache_file=prebaked_file,
         adapter_label=adapter_id,
+        max_kv_size=args.max_kv_size,
     )
 
 
