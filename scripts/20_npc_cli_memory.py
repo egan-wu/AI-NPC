@@ -93,6 +93,7 @@ from src.cache_utils import (
 )
 from src.runtime_config import get_config
 from src.logging_config import get_logger
+from src.metrics import MetricsRecorder
 
 log = get_logger(__name__)
 
@@ -229,6 +230,7 @@ def chat_loop(
     guard: Guard,
     memory: HierarchicalMemory,
     system_prompt: str,
+    persona_id: str,
     npc_name: str,
     location: str,
     use_history: bool,
@@ -264,6 +266,15 @@ def chat_loop(
         flags.append("timing=on")
     print(f"  {DIM}Settings: {' · '.join(flags)}{RESET}")
     print(f"{BOLD}{'─'*56}{RESET}\n")
+
+    # Per-session metrics writer (one JSONL row per turn → outputs/metrics/turns.jsonl)
+    metrics = MetricsRecorder(
+        npc=persona_id, adapter_id=adapter_label, cache_mode=cache_mode,
+    )
+    log.info("Chat session started", extra={
+        "session_id": metrics.session_id, "npc": persona_id,
+        "adapter": adapter_label, "cache_mode": cache_mode,
+    })
 
     sampler   = make_sampler(temp=temperature)
     logit_prs = make_logits_processors(repetition_penalty=rep_penalty)
@@ -401,6 +412,20 @@ def chat_loop(
 
         print(f"\n  {tag} {mem_tag} {p_tag} {timing_tag}\n")
 
+        # ── Per-turn metrics (one JSONL row → outputs/metrics/turns.jsonl) ────
+        metrics.record_turn(
+            ttft_ms=ttft * 1000,
+            gen_ms=t_gen * 1000,
+            guard_ms=t_guard * 1000,
+            mem_ms=t_mem * 1000,
+            mem_hits=mem_hits,   # always populated by HierarchicalMemory.retrieve_context
+            kv_offset=cache_len,
+            blocked=blocked,
+            guard_p=p,
+            input_chars=len(raw),
+            output_chars=len(response),
+        )
+
         # ── Persist this turn to ChromaDB ─────────────────────────────────────
         memory.add_turn(raw, response)
 
@@ -534,7 +559,7 @@ def main():
 
     chat_loop(
         model, tokenizer, guard, memory,
-        system_prompt, npc_name, location,
+        system_prompt, persona_id, npc_name, location,
         use_history=args.history,
         temperature=args.temp,
         rep_penalty=args.rep_penalty,
